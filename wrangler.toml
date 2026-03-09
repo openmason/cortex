@@ -1,0 +1,76 @@
+name = "cortex"
+main = "src/index.ts"
+compatibility_date = "2025-02-01"
+
+[observability]
+enabled = true
+
+# --- Durable Objects (Mastra workflow pause/resume) ---
+[[durable_objects.bindings]]
+name = "WORKFLOW_DO"
+class_name = "WorkflowDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["WorkflowDurableObject"]
+
+# --- KV Namespaces ---
+[[kv_namespaces]]
+binding = "SESSION_CACHE"
+id = "41f4c080699548b78d8268dae976050f"
+
+[[kv_namespaces]]
+binding = "WORKFLOW_STATE"
+id = "25de6e1a514e43f58ef7e4be921f3a43"
+
+# --- Hyperdrive (Neon Postgres) ---
+[[hyperdrive]]
+binding = "HYPERDRIVE"
+id = "f61c21a7e1204ce4942c591cfe663b23"
+localConnectionString = "${DATABASE_URL}"
+
+# --- R2 (skill bundles, artifacts) ---
+[[r2_buckets]]
+binding = "R2_BUCKET"
+bucket_name = "cortex-artifacts"
+
+# --- Queues ---
+[[queues.producers]]
+binding = "FORGE_QUEUE"
+queue = "cortex-forge"
+
+[[queues.producers]]
+binding = "COGNIUM_QUEUE"
+queue = "cortex-cognium"
+
+[[queues.consumers]]
+queue = "cortex-forge"
+max_batch_size = 5
+max_batch_timeout = 30
+
+[[queues.consumers]]
+queue = "cortex-cognium"
+max_batch_size = 5
+max_batch_timeout = 30
+
+# --- Service Bindings (worker-to-worker) ---
+[[services]]
+binding = "RUNICS_SERVICE"
+service = "runics"
+
+# --- Workers AI ---
+[ai]
+binding = "AI"
+
+# --- Environment Variables ---
+[vars]
+ENVIRONMENT = "production"
+RUNICS_URL = "https://runics.phantoms.workers.dev"
+COGNIUM_URL = "https://circle.cognium.net"
+DAYTONA_URL = "https://api.daytona.io"
+LLMPROXY_URL = "https://llmproxy.xus.one"
+LLM_MODEL = "cognium/claude-sonnet-latest"
+DEFAULT_EXECUTION_MODE = "review_before_run"
+DEFAULT_APPETITE = "balanced"
+WORKFLOW_TIMEOUT_MS = "300000"
+MAX_SKILL_CHAIN_DEPTH = "10"

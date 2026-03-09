@@ -1,0 +1,4 @@
+LLMPROXY_API_KEY=sk-xxxxx
+DAYTONA_API_KEY=daytona-xxxxx
+DATABASE_URL=postgresql://user:pass@host/dbname
+ADMIN_SECRET=admin-xxxxx

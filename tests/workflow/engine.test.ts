@@ -1,0 +1,338 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { WorkflowEngine } from "../../src/workflow/engine";
+import type { Env, WorkflowPlan, TenantContext, SkillReference } from "../../src/types";
+
+function makeSkill(overrides: Partial<SkillReference> = {}): SkillReference {
+  return {
+    id: "skill-1",
+    slug: "test-skill",
+    version: "1.0.0",
+    name: "Test Skill",
+    executionLayer: "mcp-remote",
+    mcpUrl: "https://mcp.example.com/tools",
+    trustScore: 0.85,
+    verificationTier: "verified",
+    trustBadge: null,
+    status: "published",
+    skillType: "atomic",
+    runCount: 10,
+    ...overrides,
+  };
+}
+
+function makePlan(overrides: Partial<WorkflowPlan> = {}): WorkflowPlan {
+  return {
+    id: "wf-1",
+    mode: "full_auto",
+    createdAt: new Date().toISOString(),
+    steps: [
+      {
+        id: "step-1",
+        order: 0,
+        skill: makeSkill(),
+        onError: "fail",
+        status: "pending",
+      },
+    ],
+    ...overrides,
+  };
+}
+
+const makeTenant = (overrides: Partial<TenantContext> = {}): TenantContext => ({
+  tenantId: "tenant-1",
+  userId: "user-1",
+  product: "controlcenter",
+  appetite: "balanced",
+  executionMode: "full_auto",
+  ...overrides,
+});
+
+function makeMockEnv(): Env {
+  const kvStore = new Map<string, string>();
+  return {
+    SESSION_CACHE: {} as KVNamespace,
+    WORKFLOW_STATE: {
+      put: vi.fn(async (key: string, value: string) => { kvStore.set(key, value); }),
+      get: vi.fn(async (key: string) => kvStore.get(key) ?? null),
+    } as unknown as KVNamespace,
+    HYPERDRIVE: {} as Hyperdrive,
+    R2_BUCKET: {
+      get: vi.fn().mockResolvedValue({ arrayBuffer: () => new ArrayBuffer(0) }),
+    } as unknown as R2Bucket,
+    FORGE_QUEUE: { send: vi.fn() } as unknown as Queue,
+    COGNIUM_QUEUE: { send: vi.fn() } as unknown as Queue,
+    AI: {} as Ai,
+    WORKFLOW_DO: {} as DurableObjectNamespace,
+    ENVIRONMENT: "test",
+    RUNICS_URL: "https://runics.phantoms.workers.dev",
+    COGNIUM_URL: "https://circle.cognium.net",
+    DAYTONA_URL: "https://api.daytona.io",
+    LLM_MODEL: "claude-sonnet-4-20250514",
+    DEFAULT_EXECUTION_MODE: "review_before_run",
+    DEFAULT_APPETITE: "balanced",
+    WORKFLOW_TIMEOUT_MS: "300000",
+    MAX_SKILL_CHAIN_DEPTH: "10",
+    LLMPROXY_URL: "https://litellm.test.local",
+    LLMPROXY_API_KEY: "test-key",
+    DAYTONA_API_KEY: "test-key",
+    DATABASE_URL: "postgresql://test:test@localhost/test",
+  } as Env;
+}
+
+describe("WorkflowEngine", () => {
+  let engine: WorkflowEngine;
+  let env: Env;
+  const ctx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    env = makeMockEnv();
+    engine = new WorkflowEngine(env);
+
+    // Mock fetch for L0 MCP calls and Runics invocations
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ result: { data: "ok" } }),
+    }));
+  });
+
+  describe("start", () => {
+    it("should execute full_auto workflow immediately", async () => {
+      const plan = makePlan({ mode: "full_auto" });
+      const tenant = makeTenant({ executionMode: "full_auto" });
+
+      const state = await engine.start(plan, tenant, ctx);
+
+      expect(state.status).toBe("completed");
+      expect(state.plan.steps[0].status).toBe("completed");
+      expect(state.completedAt).toBeDefined();
+    });
+
+    it("should pause review_before_run workflow for approval", async () => {
+      const plan = makePlan({ mode: "review_before_run" });
+      const tenant = makeTenant({ executionMode: "review_before_run" });
+
+      const state = await engine.start(plan, tenant, ctx);
+
+      expect(state.status).toBe("paused_for_review");
+      expect(state.pausedAt).toBeDefined();
+    });
+
+    it("should pause step_by_step workflow for approval", async () => {
+      const plan = makePlan({ mode: "step_by_step" });
+      const tenant = makeTenant({ executionMode: "step_by_step" });
+
+      const state = await engine.start(plan, tenant, ctx);
+
+      expect(state.status).toBe("paused_for_review");
+    });
+
+    it("should block workflow if any skill is revoked", async () => {
+      const plan = makePlan({
+        mode: "full_auto",
+        steps: [
+          {
+            id: "step-1",
+            order: 0,
+            skill: makeSkill({ status: "revoked", revokedReason: "CVE-2024-0001" }),
+            onError: "fail",
+            status: "pending",
+          },
+        ],
+      });
+      const tenant = makeTenant();
+
+      const state = await engine.start(plan, tenant, ctx);
+
+      expect(state.status).toBe("failed");
+      expect(state.error).toContain("revoked");
+    });
+
+    it("should block workflow if skill trust is below appetite", async () => {
+      const plan = makePlan({
+        mode: "full_auto",
+        steps: [
+          {
+            id: "step-1",
+            order: 0,
+            skill: makeSkill({ trustScore: 0.3 }),
+            onError: "fail",
+            status: "pending",
+          },
+        ],
+      });
+      const tenant = makeTenant({ appetite: "balanced" }); // threshold = 0.50
+
+      const state = await engine.start(plan, tenant, ctx);
+
+      expect(state.status).toBe("failed");
+      expect(state.error).toContain("below appetite threshold");
+    });
+
+    it("should trigger Forge auto-distill after successful completion", async () => {
+      const plan = makePlan({ mode: "full_auto" });
+      const tenant = makeTenant();
+
+      await engine.start(plan, tenant, ctx);
+
+      expect(ctx.waitUntil).toHaveBeenCalled();
+      expect(env.FORGE_QUEUE.send).toHaveBeenCalled();
+    });
+  });
+
+  describe("resume", () => {
+    it("should execute a paused workflow after approval", async () => {
+      const plan = makePlan({ mode: "review_before_run" });
+      const tenant = makeTenant();
+
+      const pausedState = await engine.start(plan, tenant, ctx);
+      expect(pausedState.status).toBe("paused_for_review");
+
+      const resumedState = await engine.resume(pausedState, true, undefined, ctx);
+      expect(resumedState.status).toBe("completed");
+    });
+
+    it("should fail workflow if rejected", async () => {
+      const plan = makePlan({ mode: "review_before_run" });
+      const tenant = makeTenant();
+
+      const pausedState = await engine.start(plan, tenant, ctx);
+      const rejectedState = await engine.resume(pausedState, false);
+
+      expect(rejectedState.status).toBe("failed");
+      expect(rejectedState.error).toContain("rejected");
+    });
+
+    it("should apply modified plan on resume", async () => {
+      const plan = makePlan({ mode: "review_before_run" });
+      const tenant = makeTenant();
+
+      const pausedState = await engine.start(plan, tenant, ctx);
+
+      const modifiedPlan: WorkflowPlan = {
+        ...plan,
+        steps: [
+          ...plan.steps,
+          {
+            id: "step-2",
+            order: 1,
+            skill: makeSkill({ id: "skill-2", slug: "added-skill" }),
+            onError: "skip",
+            status: "pending",
+          },
+        ],
+      };
+
+      const resumedState = await engine.resume(pausedState, true, modifiedPlan, ctx);
+      expect(resumedState.status).toBe("completed");
+      expect(resumedState.plan.steps.length).toBe(2);
+    });
+  });
+
+  describe("error handling", () => {
+    it("should skip failed step with onError=skip", async () => {
+      // First fetch call fails (MCP), second succeeds
+      let callCount = 0;
+      vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) {
+          return Promise.resolve({ ok: false, status: 500, text: () => Promise.resolve("error") });
+        }
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ result: { data: "ok" } }),
+        });
+      }));
+
+      const plan = makePlan({
+        mode: "full_auto",
+        steps: [
+          {
+            id: "step-1",
+            order: 0,
+            skill: makeSkill({ id: "s1" }),
+            onError: "skip",
+            status: "pending",
+          },
+          {
+            id: "step-2",
+            order: 1,
+            skill: makeSkill({ id: "s2" }),
+            onError: "fail",
+            status: "pending",
+          },
+        ],
+      });
+
+      const state = await engine.start(plan, makeTenant(), ctx);
+
+      expect(state.status).toBe("completed");
+      expect(state.plan.steps[0].status).toBe("skipped");
+      expect(state.plan.steps[1].status).toBe("completed");
+    });
+
+    it("should fail workflow on step failure with onError=fail", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        text: () => Promise.resolve("Internal error"),
+      }));
+
+      const plan = makePlan({ mode: "full_auto" });
+      const state = await engine.start(plan, makeTenant(), ctx);
+
+      expect(state.status).toBe("failed");
+      expect(state.plan.steps[0].status).toBe("failed");
+    });
+  });
+
+  describe("step_by_step mode", () => {
+    it("should pause after each step for confirmation", async () => {
+      const plan = makePlan({
+        mode: "step_by_step",
+        steps: [
+          { id: "s1", order: 0, skill: makeSkill({ id: "s1" }), onError: "fail", status: "pending" },
+          { id: "s2", order: 1, skill: makeSkill({ id: "s2" }), onError: "fail", status: "pending" },
+        ],
+      });
+
+      // First start — pauses for review (before any execution)
+      const state1 = await engine.start(plan, makeTenant(), ctx);
+      expect(state1.status).toBe("paused_for_review");
+
+      // Resume — executes step 1, then pauses before step 2
+      const state2 = await engine.resume(state1, true, undefined, ctx);
+      expect(state2.status).toBe("paused_at_step");
+      expect(state2.currentStepIndex).toBe(1);
+
+      // Resume — executes step 2. Since step_by_step pauses before each
+      // step after the first, step 2 also requires a resume cycle.
+      const state3 = await engine.resume(state2, true, undefined, ctx);
+      // Step 2 is the last step, so after execution it completes.
+      // But the engine pauses BEFORE executing (i > 0 check), so
+      // after resuming from paused_at_step=1, it executes step 1 (index 1)
+      // and there are no more steps, so it completes.
+      expect(state3.status).toBe("completed");
+    });
+  });
+
+  describe("persistence", () => {
+    it("should persist and load workflow state from KV", async () => {
+      const plan = makePlan({ mode: "review_before_run" });
+      const tenant = makeTenant();
+
+      const state = await engine.start(plan, tenant, ctx);
+
+      // Load from KV
+      const loaded = await engine.loadState(state.workflowId);
+      expect(loaded).not.toBeNull();
+      expect(loaded!.workflowId).toBe(state.workflowId);
+      expect(loaded!.status).toBe("paused_for_review");
+    });
+
+    it("should return null for non-existent workflow", async () => {
+      const loaded = await engine.loadState("nonexistent-id");
+      expect(loaded).toBeNull();
+    });
+  });
+});
