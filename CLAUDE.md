@@ -33,13 +33,21 @@ Cloudflare Workers-based agent runtime that orchestrates skill discovery, planni
 - Schema already pushed to Neon DB (4 tables, 8 indexes)
 - Durable Objects use `new_sqlite_classes` migration (required for free plan)
 
-## Auth
+## Auth & Scopes
 - Bearer API key auth on all `/v1/*` routes via `src/middleware/auth.ts`
 - Keys stored in `SESSION_CACHE` KV: `apikey:{key}` → `{tenantId, userId, product, scopes}`
 - Key format: `ctx_` + 32 hex chars
 - Admin routes (`/admin/*`) protected by `ADMIN_SECRET` env var
-- Create keys: `POST /admin/api-keys` with `{tenantId, userId, product}`
+- Create keys: `POST /admin/api-keys` with `{tenantId, userId, product, scopes?}`
 - Revoke keys: `DELETE /admin/api-keys/:key`
+- **Scope enforcement** via `requireScope()` middleware:
+  - `run` — `/v1/run`, `/v1/run/stream`, `/v1/run/:id`, `/v1/run/:id/resume`, `/v1/run/:id/save`
+  - `sessions` — `/v1/sessions/*`
+  - `skills` — `/v1/skills/*`
+  - `models` — no scope required (open to any authenticated key)
+- Valid scopes: `["run", "sessions", "skills", "models"]`
+- Default scopes on new keys: `["run", "sessions"]`
+- **Visibility enforcement**: `userId` is passed to Runics in `findSkill` and `listComposites` for private skill filtering
 
 ## API Endpoints
 - `GET /` — Service info
@@ -53,6 +61,11 @@ Cloudflare Workers-based agent runtime that orchestrates skill discovery, planni
 - `GET /v1/sessions` — List sessions (tenant-scoped, paginated)
 - `GET /v1/sessions/:id` — Session detail with step executions
 - `GET /v1/sessions/:id/trace` — Execution trace for Forge
+- `GET /v1/skills/composites` — List composite skills (tenant-scoped, paginated)
+- `GET /v1/skills/composites/:slug` — Composite detail with composition steps
+- `PATCH /v1/skills/composites/:slug` — Update composite metadata
+- `POST /v1/skills/composites/:slug/deprecate` — Deprecate a composite
+- `POST /v1/skills/composites/:slug/fork` — Fork a composite
 - `POST /admin/api-keys` — Create API key
 - `DELETE /admin/api-keys/:key` — Revoke API key
 - `PUT /admin/policies` — Upsert tenant policy
@@ -69,7 +82,7 @@ Cloudflare Workers-based agent runtime that orchestrates skill discovery, planni
 - Admin endpoints: `PUT /admin/policies`, `GET /admin/policies/:tenantId/:product`
 
 ## Testing
-- 181 unit tests passing (`npx vitest run`)
+- 371 unit tests passing across 24 test files (`npx vitest run`)
 - Local dev tested with `npx wrangler dev` — health, models, and full run request all work
 - Sample query script: `scripts/sample-query.ts` (mocked, in-process)
 
@@ -86,7 +99,9 @@ Cloudflare Workers-based agent runtime that orchestrates skill discovery, planni
 - `src/db/repository.ts` — DB operations (sessions, policies, traces)
 - `src/routes/run.ts` — /v1/run, /v1/run/stream, /v1/run/:id, resume, save, models
 - `src/routes/sessions.ts` — /v1/sessions, /v1/sessions/:id, /v1/sessions/:id/trace
+- `src/routes/skills.ts` — /v1/skills/composites CRUD (list, detail, update, deprecate, fork)
 - `src/routes/admin.ts` — /admin/api-keys, /admin/policies
+- `src/clients/forge.ts` — Forge client (auto-distill, human-distill/save-as-skill)
 - `src/routes/health.ts` — /health
 - `src/queues/forge-consumer.ts` — auto-distill and generate handlers
 - `src/queues/cognium-consumer.ts` — scan and trust update handlers
@@ -98,6 +113,7 @@ Master specification: `cortex-specification.md`
 
 ## Next Steps (Prioritized)
 1. End-to-end workflow test with real LLM + Runics
-2. Rate limiting / usage tracking
-3. WebSocket support for real-time workflow updates
-4. Multi-tenant isolation improvements
+2. Rate limiting / usage tracking per API key
+3. Observability — structured logging, Cloudflare Analytics Engine
+4. Webhook/callback support for long-running workflows
+5. Workflow timeout enforcement via Durable Objects

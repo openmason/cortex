@@ -1,8 +1,11 @@
 import { Hono } from "hono";
 import type { Env, AppVariables } from "../types";
 import { WorkflowRepository } from "../db/repository";
+import { requireScope } from "../middleware/auth";
 
 const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
+
+app.use("*", requireScope("sessions"));
 
 // ---------------------------------------------------------------------------
 // GET /v1/sessions — List sessions for the authenticated tenant

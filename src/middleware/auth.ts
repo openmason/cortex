@@ -41,3 +41,20 @@ export const authMiddleware = createMiddleware<{
 
   await next();
 });
+
+/**
+ * Scope enforcement middleware factory.
+ * Returns 403 if the authenticated API key doesn't have the required scope.
+ */
+export function requireScope(scope: string) {
+  return createMiddleware<{
+    Bindings: Env;
+    Variables: AppVariables;
+  }>(async (c, next) => {
+    const scopes = c.get("scopes") ?? [];
+    if (!scopes.includes(scope)) {
+      return c.json({ error: `Missing required scope: ${scope}` }, 403);
+    }
+    await next();
+  });
+}

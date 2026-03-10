@@ -9,6 +9,7 @@ import type {
   RunRequest,
   RunResponse,
   SSEEvent,
+  SaveAsSkillResponse,
 } from "../types";
 import { RunicsClient } from "../clients/runics";
 import { LLMClient, type ChatMessage } from "../clients/llm";
@@ -391,24 +392,51 @@ export class SupervisorAgent {
    */
   async saveAsSkill(
     workflowId: string,
+    tenantId: string,
+    userId: string,
     name: string,
     description: string,
     visibility: "public" | "team" | "private",
-  ): Promise<{ skillId: string; slug: string }> {
+    tags?: string[],
+    category?: string,
+  ): Promise<SaveAsSkillResponse> {
     const state = await this.engine.loadState(workflowId);
-    if (!state || state.status !== "completed") {
-      throw new Error("Can only save completed workflows as skills");
+
+    if (!state) {
+      throw new Error("Workflow not found. It may have been deleted or expired.");
+    }
+
+    if (state.status !== "completed") {
+      throw new Error(`Cannot save workflow with status '${state.status}'. Only completed workflows can be saved as skills.`);
+    }
+
+    // Security: validate the requesting tenant owns this workflow
+    if (state.tenantId !== tenantId) {
+      throw new Error("Unauthorized: this workflow belongs to a different tenant.");
     }
 
     const { ForgeClient } = await import("../clients/forge");
     const forge = new ForgeClient(this.env);
-    return forge.humanDistill({
+    const result = await forge.humanDistill({
       name,
       description,
       workflowState: state,
-      userId: state.userId,
+      userId,
       visibility,
+      tags,
+      category,
     });
+
+    // Mark the execution trace as saved in the DB (non-blocking, best-effort)
+    try {
+      const { WorkflowRepository } = await import("../db/repository");
+      const repo = new WorkflowRepository(this.env);
+      await repo.markTraceAsSaved(workflowId, result.skillId);
+    } catch {
+      // DB marking is best-effort — don't fail the save
+    }
+
+    return result;
   }
 
   // -----------------------------------------------------------------------
@@ -515,6 +543,7 @@ Be concise. Focus on finding and executing the right skills.`;
     return this.runics.findSkill({
       query: prompt,
       tenantId: tenant.tenantId,
+      userId: tenant.userId,
       appetite: tenant.appetite,
     });
   }

@@ -4,8 +4,13 @@ import { z } from "zod";
 import type { Env, AppVariables, RunRequest, ResumeRequest, SSEEvent } from "../types";
 import { SupervisorAgent } from "../agents/supervisor";
 import { LLMClient, MODELS } from "../clients/llm";
+import { requireScope } from "../middleware/auth";
 
 const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
+
+// Scope enforcement
+app.use("/run", requireScope("run"));
+app.use("/run/*", requireScope("run"));
 
 // ---------------------------------------------------------------------------
 // POST /v1/run — Start a new workflow
@@ -140,6 +145,8 @@ const saveSchema = z.object({
   name: z.string().min(1).max(200),
   description: z.string().min(10).max(2000),
   visibility: z.enum(["public", "team", "private"]).default("team"),
+  tags: z.array(z.string().max(50)).max(10).optional(),
+  category: z.string().max(100).optional(),
 });
 
 app.post("/run/:workflowId/save", async (c) => {
@@ -155,16 +162,21 @@ app.post("/run/:workflowId/save", async (c) => {
     const supervisor = new SupervisorAgent(c.env);
     const result = await supervisor.saveAsSkill(
       workflowId,
+      c.get("tenantId"),
+      c.get("userId"),
       parsed.data.name,
       parsed.data.description,
       parsed.data.visibility,
+      parsed.data.tags,
+      parsed.data.category,
     );
     return c.json(result, 201);
   } catch (err) {
-    return c.json(
-      { error: err instanceof Error ? err.message : "Failed to save skill" },
-      422,
-    );
+    const msg = err instanceof Error ? err.message : "Failed to save skill";
+    const status = msg.includes("Unauthorized") ? 403
+      : msg.includes("not found") ? 404
+      : 422;
+    return c.json({ error: msg }, status);
   }
 });
 

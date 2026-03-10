@@ -228,6 +228,7 @@ export class ToolExecutor {
       response = await this.runics.findSkill({
         query: args.query as string,
         tenantId: this.tenant.tenantId,
+        userId: this.tenant.userId,
         appetite: this.tenant.appetite,
         tags: args.tags as string[] | undefined,
         category: args.category as string | undefined,

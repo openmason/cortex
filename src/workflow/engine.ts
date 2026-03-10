@@ -317,11 +317,38 @@ export class WorkflowEngine {
   }
 
   /**
-   * Load workflow state from KV.
+   * Load workflow state from KV, falling back to DB if KV has expired.
    */
   async loadState(workflowId: string): Promise<WorkflowState | null> {
+    // Fast path: KV
     const raw = await this.env.WORKFLOW_STATE.get(`workflow:${workflowId}`);
-    if (!raw) return null;
-    return JSON.parse(raw);
+    if (raw) return JSON.parse(raw);
+
+    // Fallback: reconstruct from DB if available
+    if (!this.repo) return null;
+
+    try {
+      const session = await this.repo.getSessionByWorkflowId(workflowId);
+      if (!session) return null;
+
+      return {
+        workflowId: session.id,
+        tenantId: session.tenantId,
+        userId: session.userId,
+        product: session.product as WorkflowState["product"],
+        mode: session.mode as ExecutionMode,
+        plan: session.planJson as unknown as WorkflowPlan,
+        currentStepIndex: session.currentStepIndex ?? 0,
+        status: session.status as WorkflowStatus,
+        startedAt: session.startedAt.toISOString(),
+        completedAt: session.completedAt?.toISOString(),
+        pausedAt: session.pausedAt?.toISOString(),
+        resumeData: session.resumeData as WorkflowState["resumeData"],
+        error: session.error ?? undefined,
+      };
+    } catch (err) {
+      console.error("[engine] DB fallback failed for loadState:", err);
+      return null;
+    }
   }
 }

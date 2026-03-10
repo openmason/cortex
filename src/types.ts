@@ -206,6 +206,7 @@ export interface TenantContext {
 export interface FindSkillRequest {
   query: string;
   tenantId: string;
+  userId?: string;
   appetite?: Appetite;
   tags?: string[];
   category?: string;
@@ -240,6 +241,101 @@ export interface DistillRequest {
   name?: string;
   description?: string;
   visibility?: Visibility;
+}
+
+export interface SaveAsSkillResponse {
+  skillId: string;
+  slug: string;
+  name: string;
+  version: string;
+  trustScore: number;
+  composedFrom: { skillId: string; slug: string; version: string; trustScore: number }[];
+  visibility: Visibility;
+  executionLayer: "composite";
+  skillType: "human-composite";
+  trustBadge: "human-verified";
+  createdAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Composite Skill Management Types
+// ---------------------------------------------------------------------------
+export interface ListCompositesResponse {
+  skills: SkillReference[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface CompositeSkillDetail extends SkillReference {
+  description: string;
+  tags: string[];
+  category?: string;
+  visibility: Visibility;
+  tenantId?: string;
+  createdAt: string;
+  updatedAt?: string;
+  compositionSteps: CompositionStep[];
+  compositionSkillIds: string[];
+  forkedFrom?: string;
+  forkedBy?: string;
+  forkChanges?: string[];
+  deprecatedAt?: string;
+  deprecatedReason?: string;
+}
+
+export interface CompositionStep {
+  stepOrder: number;
+  skillId: string;
+  skillSlug: string;
+  skillVersion: string;
+  stepName: string;
+  inputMapping?: Record<string, unknown>;
+  onError: "fail" | "skip" | "retry";
+}
+
+export interface UpdateCompositeRequest {
+  name?: string;
+  description?: string;
+  tags?: string[];
+  category?: string;
+  visibility?: Visibility;
+}
+
+export interface DeprecateCompositeRequest {
+  reason?: string;
+  replacementSkillSlug?: string;
+}
+
+export interface ForkCompositeRequest {
+  changes: string[];
+  modifications?: {
+    removeSteps?: number[];
+    reorderSteps?: number[];
+    swapSteps?: Array<{
+      stepOrder: number;
+      newSkillSlug: string;
+      newSkillVersion?: string;
+    }>;
+    addSteps?: Array<{
+      afterStepOrder: number;
+      skillSlug: string;
+      skillVersion?: string;
+      stepName: string;
+      inputMapping?: Record<string, unknown>;
+      onError?: "fail" | "skip" | "retry";
+    }>;
+  };
+}
+
+export interface ForkCompositeResponse {
+  id: string;
+  slug: string;
+  version: string;
+  forkedFrom: string;
+  trustScore: number;
+  status: "draft";
+  skillType: "forked";
 }
 
 // ---------------------------------------------------------------------------

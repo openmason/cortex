@@ -7,6 +7,7 @@ import runRoutes from "./routes/run";
 import healthRoutes from "./routes/health";
 import adminRoutes from "./routes/admin";
 import sessionRoutes from "./routes/sessions";
+import skillRoutes from "./routes/skills";
 import { handleForgeMessage } from "./queues/forge-consumer";
 import { handleCogniumMessage } from "./queues/cognium-consumer";
 
@@ -37,6 +38,7 @@ app.use("/v1/*", authMiddleware);
 // Routes
 // ---------------------------------------------------------------------------
 app.route("/v1", runRoutes);
+app.route("/v1/skills", skillRoutes);
 app.route("/v1/sessions", sessionRoutes);
 app.route("/admin", adminRoutes);
 app.route("/", healthRoutes);

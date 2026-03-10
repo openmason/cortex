@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
-import { authMiddleware } from "../../src/middleware/auth";
+import { authMiddleware, requireScope } from "../../src/middleware/auth";
 import type { Env, AppVariables } from "../../src/types";
 
 const TEST_KEY = "ctx_testapikey1234567890abcdef";
@@ -167,5 +167,64 @@ describe("Auth Middleware", () => {
       ctx,
     );
     expect(env.SESSION_CACHE.get).toHaveBeenCalledWith(`apikey:${TEST_KEY}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// requireScope middleware
+// ---------------------------------------------------------------------------
+describe("requireScope", () => {
+  let env: Env;
+  const ctx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+
+  function makeScopedApp(scope: string) {
+    const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
+    app.use("/*", authMiddleware);
+    app.use("/*", requireScope(scope));
+    app.get("/protected", (c) => c.json({ ok: true }));
+    return app;
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    env = makeMockEnv(); // key has scopes: ["run", "sessions"]
+  });
+
+  it("should pass when key has the required scope", async () => {
+    const app = makeScopedApp("run");
+    const res = await app.fetch(
+      new Request("http://localhost/protected", {
+        headers: { Authorization: `Bearer ${TEST_KEY}` },
+      }),
+      env,
+      ctx,
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("should return 403 when key lacks the required scope", async () => {
+    const app = makeScopedApp("skills");
+    const res = await app.fetch(
+      new Request("http://localhost/protected", {
+        headers: { Authorization: `Bearer ${TEST_KEY}` },
+      }),
+      env,
+      ctx,
+    );
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as any;
+    expect(body.error).toContain("skills");
+  });
+
+  it("should pass when key has multiple scopes including the required one", async () => {
+    const app = makeScopedApp("sessions");
+    const res = await app.fetch(
+      new Request("http://localhost/protected", {
+        headers: { Authorization: `Bearer ${TEST_KEY}` },
+      }),
+      env,
+      ctx,
+    );
+    expect(res.status).toBe(200);
   });
 });

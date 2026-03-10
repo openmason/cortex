@@ -156,6 +156,25 @@ export class WorkflowRepository {
   }
 
   /**
+   * Get a session by workflowId without tenant scoping.
+   * Used for DB fallback when KV state has expired.
+   */
+  async getSessionByWorkflowId(workflowId: string) {
+    try {
+      const sessions = await this.db
+        .select()
+        .from(workflowSessions)
+        .where(eq(workflowSessions.id, workflowId))
+        .limit(1);
+
+      return sessions.length > 0 ? sessions[0] : null;
+    } catch (err) {
+      console.error("[db] Failed to get session by workflowId:", err);
+      return null;
+    }
+  }
+
+  /**
    * Load a tenant policy from the database.
    * Returns null if no policy exists for this tenant+product.
    */

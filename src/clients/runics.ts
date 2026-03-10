@@ -1,4 +1,14 @@
-import type { Env, FindSkillRequest, FindSkillResponse, SkillReference } from "../types";
+import type {
+  Env,
+  FindSkillRequest,
+  FindSkillResponse,
+  SkillReference,
+  ListCompositesResponse,
+  CompositeSkillDetail,
+  UpdateCompositeRequest,
+  ForkCompositeRequest,
+  ForkCompositeResponse,
+} from "../types";
 
 export class RunicsClient {
   private baseUrl: string;
@@ -28,6 +38,7 @@ export class RunicsClient {
       body: JSON.stringify({
         query: request.query,
         tenantId: request.tenantId,
+        userId: request.userId,
         appetite: request.appetite ?? "balanced",
         tags: request.tags,
         category: request.category,
@@ -80,5 +91,116 @@ export class RunicsClient {
         ],
       }),
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Composite Skill Management
+  // ---------------------------------------------------------------------------
+
+  async listComposites(
+    tenantId: string,
+    options?: { status?: string; limit?: number; offset?: number; userId?: string },
+  ): Promise<ListCompositesResponse> {
+    const params = new URLSearchParams({
+      tenantId,
+      skillType: "human-composite,auto-composite,forked",
+    });
+    if (options?.userId) params.set("userId", options.userId);
+    if (options?.status) params.set("status", options.status);
+    if (options?.limit) params.set("limit", String(options.limit));
+    if (options?.offset) params.set("offset", String(options.offset));
+
+    const res = await this.runicsFetch(`/v1/skills?${params.toString()}`);
+
+    if (!res.ok) {
+      throw new Error(`Runics listComposites failed: ${res.status}`);
+    }
+
+    return res.json();
+  }
+
+  async getCompositeDetail(slug: string, version?: string): Promise<CompositeSkillDetail | null> {
+    const path = version
+      ? `/v1/skills/${slug}/${version}?include=steps`
+      : `/v1/skills/${slug}?include=steps`;
+    const res = await this.runicsFetch(path);
+
+    if (res.status === 404) return null;
+    if (!res.ok) {
+      throw new Error(`Runics getCompositeDetail failed: ${res.status}`);
+    }
+
+    return res.json();
+  }
+
+  async updateComposite(
+    slug: string,
+    tenantId: string,
+    updates: UpdateCompositeRequest,
+  ): Promise<CompositeSkillDetail> {
+    const res = await this.runicsFetch(`/v1/skills/${slug}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...updates, tenantId }),
+    });
+
+    if (res.status === 404) {
+      throw new Error("Composite skill not found");
+    }
+    if (res.status === 403) {
+      throw new Error("Unauthorized: only the owning tenant can update this skill");
+    }
+    if (!res.ok) {
+      throw new Error(`Runics updateComposite failed: ${res.status}`);
+    }
+
+    return res.json();
+  }
+
+  async deprecateComposite(
+    slug: string,
+    tenantId: string,
+    reason?: string,
+    replacementSkillSlug?: string,
+  ): Promise<{ slug: string; status: string }> {
+    const res = await this.runicsFetch(`/v1/skills/${slug}/deprecate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tenantId, reason, replacementSkillSlug }),
+    });
+
+    if (res.status === 404) {
+      throw new Error("Composite skill not found");
+    }
+    if (res.status === 403) {
+      throw new Error("Unauthorized: only the owning tenant can deprecate this skill");
+    }
+    if (!res.ok) {
+      throw new Error(`Runics deprecateComposite failed: ${res.status}`);
+    }
+
+    return res.json();
+  }
+
+  async forkComposite(
+    slug: string,
+    tenantId: string,
+    userId: string,
+    request: ForkCompositeRequest,
+  ): Promise<ForkCompositeResponse> {
+    const res = await this.runicsFetch(`/v1/skills/${slug}/fork`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...request, tenantId, forkedBy: userId }),
+    });
+
+    if (res.status === 404) {
+      throw new Error("Composite skill not found");
+    }
+    if (!res.ok) {
+      throw new Error(`Runics forkComposite failed: ${res.status}`);
+    }
+
+    return res.json();
   }
 }

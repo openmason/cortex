@@ -20,11 +20,13 @@ app.use("*", async (c, next) => {
 // ---------------------------------------------------------------------------
 // POST /admin/api-keys — Create an API key
 // ---------------------------------------------------------------------------
+const VALID_SCOPES = ["run", "sessions", "skills", "models"] as const;
+
 const createKeySchema = z.object({
   tenantId: z.string().min(1),
   userId: z.string().min(1),
   product: z.enum(["bombastic", "costaff", "controlcenter"]),
-  scopes: z.array(z.string()).default(["run", "sessions"]),
+  scopes: z.array(z.enum(VALID_SCOPES)).default(["run", "sessions"]),
 });
 
 app.post("/api-keys", async (c) => {
