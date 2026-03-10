@@ -129,6 +129,53 @@ describe("POST /v1/run/stream", () => {
     expect(res.status).toBe(401);
   });
 
+  it("should emit conversation event with conversationId", async () => {
+    // Mock LLM: single turn, direct response
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        id: "chatcmpl-1",
+        object: "chat.completion",
+        created: Date.now(),
+        model: "test-model",
+        choices: [{
+          index: 0,
+          message: { role: "assistant", content: "Hi!", tool_calls: undefined },
+          finish_reason: "stop",
+        }],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      }),
+    }));
+
+    const res = await app.fetch(
+      new Request("http://localhost/v1/run/stream", {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: "hello", product: "bombastic" }),
+      }),
+      env,
+      ctx,
+    );
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const events = parseSSE(text);
+    const eventTypes = events.map((e) => e.event);
+
+    expect(eventTypes).toContain("conversation");
+
+    const convEvent = events.find((e) => e.event === "conversation");
+    const convData = JSON.parse(convEvent!.data);
+    expect(convData.conversationId).toMatch(/^conv_/);
+    expect(convData.isNew).toBe(true);
+    expect(convData.turnCount).toBe(0);
+
+    // Done event should also include conversationId
+    const doneEvent = events.find((e) => e.event === "done");
+    const doneData = JSON.parse(doneEvent!.data);
+    expect(doneData.conversationId).toBeDefined();
+  });
+
   it("should return SSE content type and stream events", async () => {
     // Mock LLM: single turn, no tool calls (direct response)
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({

@@ -4,8 +4,13 @@ import type { Env, RunRequest } from "../../src/types";
 
 function makeMockEnv(): Env {
   const kvStore = new Map<string, string>();
+  const sessionStore = new Map<string, string>();
   return {
-    SESSION_CACHE: {} as KVNamespace,
+    SESSION_CACHE: {
+      put: vi.fn(async (key: string, value: string) => { sessionStore.set(key, value); }),
+      get: vi.fn(async (key: string) => sessionStore.get(key) ?? null),
+      delete: vi.fn(async (key: string) => { sessionStore.delete(key); }),
+    } as unknown as KVNamespace,
     WORKFLOW_STATE: {
       put: vi.fn(async (key: string, value: string) => { kvStore.set(key, value); }),
       get: vi.fn(async (key: string) => kvStore.get(key) ?? null),
@@ -31,6 +36,7 @@ function makeMockEnv(): Env {
     LLMPROXY_API_KEY: "test-key",
     DAYTONA_API_KEY: "test-key",
     DATABASE_URL: "postgresql://test:test@localhost/test",
+    ADMIN_SECRET: "test-secret",
   } as Env;
 }
 
@@ -180,6 +186,118 @@ describe("SupervisorAgent", () => {
       const response = await supervisor.handleResume("nonexistent", true, undefined, ctx);
       expect(response.status).toBe("failed");
       expect(response.summary).toContain("not found");
+    });
+  });
+
+  describe("handleRequest (conversation)", () => {
+    it("should return a conversationId on new requests", async () => {
+      // Mock LLM: single turn, direct response (no tool calls)
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({
+          id: "chatcmpl-1",
+          object: "chat.completion",
+          created: Date.now(),
+          model: "test-model",
+          choices: [{
+            index: 0,
+            message: { role: "assistant", content: "Hello!", tool_calls: undefined },
+            finish_reason: "stop",
+          }],
+          usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+        }),
+      }));
+
+      const request: RunRequest = {
+        prompt: "hello",
+        tenantId: "t1",
+        userId: "u1",
+        product: "bombastic",
+      };
+
+      const response = await supervisor.handleRequest(request, ctx);
+
+      expect(response.conversationId).toBeDefined();
+      expect(response.conversationId).toMatch(/^conv_/);
+    });
+
+    it("should return failed for non-existent conversationId", async () => {
+      const request: RunRequest = {
+        prompt: "continue",
+        tenantId: "t1",
+        userId: "u1",
+        product: "bombastic",
+        conversationId: "conv_00000000-0000-0000-0000-000000000000",
+      };
+
+      const response = await supervisor.handleRequest(request, ctx);
+
+      expect(response.status).toBe("failed");
+      expect(response.summary).toContain("not found");
+      expect(response.conversationId).toBe("conv_00000000-0000-0000-0000-000000000000");
+    });
+
+    it("should persist and reload conversation history", async () => {
+      let callIndex = 0;
+      vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
+        callIndex++;
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            id: `chatcmpl-${callIndex}`,
+            object: "chat.completion",
+            created: Date.now(),
+            model: "test-model",
+            choices: [{
+              index: 0,
+              message: {
+                role: "assistant",
+                content: callIndex <= 1 ? "Answer to turn 1." : "Answer to turn 2, with context from turn 1.",
+                tool_calls: undefined,
+              },
+              finish_reason: "stop",
+            }],
+            usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+          }),
+        });
+      }));
+
+      // Turn 1
+      const req1: RunRequest = {
+        prompt: "What is Cortex?",
+        tenantId: "t1",
+        userId: "u1",
+        product: "bombastic",
+      };
+
+      const res1 = await supervisor.handleRequest(req1, ctx);
+      expect(res1.conversationId).toBeDefined();
+
+      // Wait for waitUntil to complete (it's a mock, should resolve sync)
+      const convId = res1.conversationId!;
+
+      // Turn 2 — same conversation
+      const req2: RunRequest = {
+        prompt: "Tell me more",
+        tenantId: "t1",
+        userId: "u1",
+        product: "bombastic",
+        conversationId: convId,
+      };
+
+      const res2 = await supervisor.handleRequest(req2, ctx);
+      expect(res2.conversationId).toBe(convId);
+      expect(res2.status).not.toBe("failed");
+
+      // Verify the LLM received history messages (the second fetch should have more messages)
+      const fetchCalls = (fetch as any).mock.calls;
+      // The second LLM call should have the URL and body with history
+      const secondCallBody = JSON.parse(fetchCalls[1][1].body);
+      const messageRoles = secondCallBody.messages.map((m: any) => m.role);
+      // Should have: system, user (turn 1), assistant (turn 1 answer), user (turn 2)
+      expect(messageRoles).toContain("system");
+      expect(messageRoles.filter((r: string) => r === "user").length).toBeGreaterThanOrEqual(2);
+      expect(messageRoles.filter((r: string) => r === "assistant").length).toBeGreaterThanOrEqual(1);
     });
   });
 });

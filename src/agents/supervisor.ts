@@ -14,6 +14,7 @@ import { RunicsClient } from "../clients/runics";
 import { LLMClient, type ChatMessage } from "../clients/llm";
 import { WorkflowEngine } from "../workflow/engine";
 import { PolicyEngine } from "../policy/engine";
+import { ConversationManager, type ConversationState } from "../conversation/manager";
 import { getProductConfig } from "./product-configs";
 import { ToolExecutor, getToolsForProduct } from "./tools";
 
@@ -34,12 +35,14 @@ export class SupervisorAgent {
   private llm: LLMClient;
   private engine: WorkflowEngine;
   private policyEngine: PolicyEngine;
+  private conversations: ConversationManager;
 
   constructor(private env: Env) {
     this.runics = new RunicsClient(env);
     this.llm = new LLMClient(env);
     this.engine = new WorkflowEngine(env);
     this.policyEngine = new PolicyEngine(env);
+    this.conversations = new ConversationManager(env);
   }
 
   /**
@@ -62,23 +65,44 @@ export class SupervisorAgent {
       executionMode: request.mode ?? config.defaultMode,
     };
 
+    // --- Conversation: load or create ---
+    let convState: ConversationState;
+    let conversationId: string;
+
+    if (request.conversationId) {
+      const loaded = await this.conversations.load(request.tenantId, request.conversationId);
+      if (!loaded) {
+        return {
+          workflowId: crypto.randomUUID(),
+          status: "failed",
+          summary: "Conversation not found or expired.",
+          conversationId: request.conversationId,
+        };
+      }
+      convState = loaded;
+      conversationId = request.conversationId;
+    } else {
+      conversationId = this.conversations.generateId();
+      convState = this.conversations.createState(
+        conversationId,
+        request.tenantId,
+        request.userId,
+        request.product,
+      );
+    }
+
     // Create tool executor for this session
     const toolExecutor = new ToolExecutor(this.env, tenant);
     const tools = getToolsForProduct(request.product);
 
-    // Build the system + user messages
-    const messages: ChatMessage[] = [
-      { role: "system", content: this.buildSystemPrompt(config.systemPrompt, tenant) },
-      { role: "user", content: request.prompt },
-    ];
-
-    // Add context if provided
-    if (request.context && Object.keys(request.context).length > 0) {
-      messages.push({
-        role: "user",
-        content: `Additional context:\n${JSON.stringify(request.context, null, 2)}`,
-      });
-    }
+    // Build messages with conversation history
+    const systemPrompt = this.buildSystemPrompt(config.systemPrompt, tenant);
+    const messages = this.conversations.buildMessagesWithHistory(
+      systemPrompt,
+      request.prompt,
+      request.context,
+      convState.messages,
+    );
 
     // Run the agentic loop — the LLM will call findSkill, checkPolicy, buildPlan, etc.
     let agentResult: { messages: ChatMessage[]; finalContent: string };
@@ -94,8 +118,18 @@ export class SupervisorAgent {
         workflowId: crypto.randomUUID(),
         status: "failed",
         summary: `LLM planning failed: ${err instanceof Error ? err.message : String(err)}`,
+        conversationId,
       };
     }
+
+    // --- Conversation: persist updated history ---
+    const newMessages = this.conversations.extractPersistableMessages(agentResult.messages);
+    // newMessages includes the re-loaded history (as user/assistant) plus new turn messages.
+    // convState.messages has the raw history; newMessages[0..historyLen-1] mirrors it.
+    const currentTurnMessages = newMessages.slice(convState.messages.length);
+    convState.messages.push(...currentTurnMessages);
+    convState.turnCount++;
+    executionCtx.waitUntil(this.conversations.save(convState));
 
     // Extract the plan from the tool calls (look for the last buildPlan result)
     const plan = this.extractPlanFromMessages(agentResult.messages, toolExecutor, tenant);
@@ -106,6 +140,7 @@ export class SupervisorAgent {
         workflowId: crypto.randomUUID(),
         status: "completed",
         summary: agentResult.finalContent || "No actionable skills found for your request.",
+        conversationId,
       };
     }
 
@@ -121,6 +156,7 @@ export class SupervisorAgent {
           status: "failed",
           plan,
           summary: `Blocked by policy: ${reasons}`,
+          conversationId,
         };
       }
 
@@ -132,7 +168,7 @@ export class SupervisorAgent {
     // Execute via the workflow engine
     const state = await this.engine.start(plan, tenant, executionCtx);
 
-    return this.stateToResponse(state, agentResult.finalContent);
+    return this.stateToResponse(state, agentResult.finalContent, conversationId);
   }
 
   /**
@@ -233,20 +269,50 @@ export class SupervisorAgent {
       executionMode: request.mode ?? config.defaultMode,
     };
 
+    // --- Conversation: load or create ---
+    let convState: ConversationState;
+    let conversationId: string;
+
+    if (request.conversationId) {
+      const loaded = await this.conversations.load(request.tenantId, request.conversationId);
+      if (!loaded) {
+        await onEvent({ event: "error", data: { message: "Conversation not found or expired." } });
+        await onEvent({ event: "done", data: { conversationId: request.conversationId } });
+        return {
+          workflowId: crypto.randomUUID(),
+          status: "failed",
+          summary: "Conversation not found or expired.",
+          conversationId: request.conversationId,
+        };
+      }
+      convState = loaded;
+      conversationId = request.conversationId;
+    } else {
+      conversationId = this.conversations.generateId();
+      convState = this.conversations.createState(
+        conversationId,
+        request.tenantId,
+        request.userId,
+        request.product,
+      );
+    }
+
+    await onEvent({
+      event: "conversation",
+      data: { conversationId, isNew: !request.conversationId, turnCount: convState.turnCount },
+    });
+
     const toolExecutor = new ToolExecutor(this.env, tenant);
     const tools = getToolsForProduct(request.product);
 
-    const messages: ChatMessage[] = [
-      { role: "system", content: this.buildSystemPrompt(config.systemPrompt, tenant) },
-      { role: "user", content: request.prompt },
-    ];
-
-    if (request.context && Object.keys(request.context).length > 0) {
-      messages.push({
-        role: "user",
-        content: `Additional context:\n${JSON.stringify(request.context, null, 2)}`,
-      });
-    }
+    // Build messages with conversation history
+    const systemPrompt = this.buildSystemPrompt(config.systemPrompt, tenant);
+    const messages = this.conversations.buildMessagesWithHistory(
+      systemPrompt,
+      request.prompt,
+      request.context,
+      convState.messages,
+    );
 
     await onEvent({ event: "planning", data: { prompt: request.prompt, product: request.product } });
 
@@ -261,22 +327,31 @@ export class SupervisorAgent {
     } catch (err) {
       const errorMsg = `LLM planning failed: ${err instanceof Error ? err.message : String(err)}`;
       await onEvent({ event: "error", data: { message: errorMsg } });
-      await onEvent({ event: "done", data: {} });
+      await onEvent({ event: "done", data: { conversationId } });
       return {
         workflowId: crypto.randomUUID(),
         status: "failed",
         summary: errorMsg,
+        conversationId,
       };
     }
+
+    // --- Conversation: persist updated history ---
+    const newMessages = this.conversations.extractPersistableMessages(agentResult.messages);
+    const currentTurnMessages = newMessages.slice(convState.messages.length);
+    convState.messages.push(...currentTurnMessages);
+    convState.turnCount++;
+    executionCtx.waitUntil(this.conversations.save(convState));
 
     const plan = this.extractPlanFromMessages(agentResult.messages, toolExecutor, tenant);
 
     if (!plan) {
-      await onEvent({ event: "done", data: { summary: agentResult.finalContent } });
+      await onEvent({ event: "done", data: { summary: agentResult.finalContent, conversationId } });
       return {
         workflowId: crypto.randomUUID(),
         status: "completed",
         summary: agentResult.finalContent || "No actionable skills found for your request.",
+        conversationId,
       };
     }
 
@@ -288,12 +363,13 @@ export class SupervisorAgent {
       if (!policyResult.allowed) {
         const reasons = policyResult.violations.map((v) => v.message).join("; ");
         await onEvent({ event: "error", data: { message: `Blocked by policy: ${reasons}` } });
-        await onEvent({ event: "done", data: {} });
+        await onEvent({ event: "done", data: { conversationId } });
         return {
           workflowId: plan.id,
           status: "failed",
           plan,
           summary: `Blocked by policy: ${reasons}`,
+          conversationId,
         };
       }
 
@@ -305,9 +381,9 @@ export class SupervisorAgent {
     // Execute with event callbacks
     const state = await this.engine.start(plan, tenant, executionCtx, undefined, onEvent);
 
-    await onEvent({ event: "done", data: { workflowId: state.workflowId, status: state.status } });
+    await onEvent({ event: "done", data: { workflowId: state.workflowId, status: state.status, conversationId } });
 
-    return this.stateToResponse(state, agentResult.finalContent);
+    return this.stateToResponse(state, agentResult.finalContent, conversationId);
   }
 
   /**
@@ -477,13 +553,14 @@ Be concise. Focus on finding and executing the right skills.`;
     };
   }
 
-  private stateToResponse(state: WorkflowState, llmSummary?: string): RunResponse {
+  private stateToResponse(state: WorkflowState, llmSummary?: string, conversationId?: string): RunResponse {
     return {
       workflowId: state.workflowId,
       status: state.status,
       plan: state.plan,
       result: state.status === "completed" ? this.collectResults(state.plan) : undefined,
       summary: llmSummary || this.buildSummary(state),
+      conversationId,
     };
   }
 

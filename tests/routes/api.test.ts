@@ -166,6 +166,61 @@ describe("API Routes", () => {
       expect(body.error).toBe("Invalid request");
     });
 
+    it("should reject invalid conversationId format", async () => {
+      const res = await app.fetch(
+        new Request("http://localhost/v1/run", {
+          method: "POST",
+          headers: { ...authHeaders(), "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt: "test",
+            conversationId: "bad-format",
+          }),
+        }),
+        env,
+        ctx,
+      );
+
+      expect(res.status).toBe(400);
+      const body = await res.json() as any;
+      expect(body.error).toBe("Invalid request");
+    });
+
+    it("should accept valid conversationId format", async () => {
+      // Mock LLM: direct response
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({
+          id: "chatcmpl-1",
+          object: "chat.completion",
+          created: Date.now(),
+          model: "test-model",
+          choices: [{
+            index: 0,
+            message: { role: "assistant", content: "Hi!", tool_calls: undefined },
+            finish_reason: "stop",
+          }],
+          usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+        }),
+      }));
+
+      const res = await app.fetch(
+        new Request("http://localhost/v1/run", {
+          method: "POST",
+          headers: { ...authHeaders(), "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt: "test",
+          }),
+        }),
+        env,
+        ctx,
+      );
+
+      expect(res.status).toBe(200);
+      const body = await res.json() as any;
+      expect(body.conversationId).toBeDefined();
+      expect(body.conversationId).toMatch(/^conv_/);
+    });
+
     it("should reject invalid product names", async () => {
       const res = await app.fetch(
         new Request("http://localhost/v1/run", {

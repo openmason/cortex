@@ -295,6 +295,7 @@ export interface RunRequest {
   mode?: ExecutionMode;
   appetite?: Appetite;
   context?: Record<string, unknown>;
+  conversationId?: string;
 }
 
 export interface RunResponse {
@@ -303,6 +304,7 @@ export interface RunResponse {
   plan?: WorkflowPlan;
   result?: unknown;
   summary?: string;
+  conversationId?: string;
 }
 
 export interface ResumeRequest {
@@ -315,6 +317,7 @@ export interface ResumeRequest {
 // Streaming (SSE)
 // ---------------------------------------------------------------------------
 export type SSEEventType =
+  | "conversation"
   | "planning"
   | "tool_call"
   | "tool_result"

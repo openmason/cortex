@@ -18,6 +18,7 @@ const runSchema = z.object({
   mode: z.enum(["full_auto", "review_before_run", "step_by_step"]).optional(),
   appetite: z.enum(["strict", "cautious", "balanced", "adventurous"]).optional(),
   context: z.record(z.unknown()).optional(),
+  conversationId: z.string().regex(/^conv_[0-9a-f-]{36}$/, "Invalid conversationId format").optional(),
 });
 
 app.post("/run", async (c) => {
