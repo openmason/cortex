@@ -316,6 +316,83 @@ describe("WorkflowEngine", () => {
     });
   });
 
+  describe("timeout enforcement", () => {
+    it("should set timeoutAt when workflow pauses for review", async () => {
+      const plan = makePlan({ mode: "review_before_run" });
+      const tenant = makeTenant();
+
+      const state = await engine.start(plan, tenant, ctx);
+
+      expect(state.status).toBe("paused_for_review");
+      expect(state.timeoutAt).toBeDefined();
+      // timeoutAt should be in the future
+      expect(new Date(state.timeoutAt!).getTime()).toBeGreaterThan(Date.now() - 1000);
+    });
+
+    it("should set timeoutAt when workflow pauses at step (step_by_step)", async () => {
+      const plan = makePlan({
+        mode: "step_by_step",
+        steps: [
+          { id: "s1", order: 0, skill: makeSkill({ id: "s1" }), onError: "fail", status: "pending" },
+          { id: "s2", order: 1, skill: makeSkill({ id: "s2" }), onError: "fail", status: "pending" },
+        ],
+      });
+      const tenant = makeTenant();
+
+      // First start pauses for review (before any execution)
+      const state1 = await engine.start(plan, tenant, ctx);
+      expect(state1.status).toBe("paused_for_review");
+      expect(state1.timeoutAt).toBeDefined();
+
+      // Resume executes step 1, then pauses at step 2
+      const state2 = await engine.resume(state1, true, undefined, ctx);
+      expect(state2.status).toBe("paused_at_step");
+      expect(state2.timeoutAt).toBeDefined();
+    });
+
+    it("should return timed_out when resuming an expired workflow", async () => {
+      const plan = makePlan({ mode: "review_before_run" });
+      const tenant = makeTenant();
+
+      const state = await engine.start(plan, tenant, ctx);
+      expect(state.status).toBe("paused_for_review");
+
+      // Simulate expiration by setting timeoutAt to the past
+      state.timeoutAt = new Date(Date.now() - 1000).toISOString();
+
+      const resumed = await engine.resume(state, true, undefined, ctx);
+      expect(resumed.status).toBe("timed_out");
+      expect(resumed.error).toContain("timed out");
+      expect(resumed.completedAt).toBeDefined();
+    });
+
+    it("should resume normally when state has no timeoutAt (backward compat)", async () => {
+      const plan = makePlan({ mode: "review_before_run" });
+      const tenant = makeTenant();
+
+      const state = await engine.start(plan, tenant, ctx);
+      expect(state.status).toBe("paused_for_review");
+
+      // Remove timeoutAt to simulate old state
+      delete state.timeoutAt;
+
+      const resumed = await engine.resume(state, true, undefined, ctx);
+      expect(resumed.status).toBe("completed");
+    });
+
+    it("should not affect non-paused workflows in checkAndApplyTimeout", async () => {
+      const plan = makePlan({ mode: "full_auto" });
+      const tenant = makeTenant();
+
+      const state = await engine.start(plan, tenant, ctx);
+      expect(state.status).toBe("completed");
+
+      // checkAndApplyTimeout should be a no-op for completed workflows
+      const checked = await engine.checkAndApplyTimeout(state);
+      expect(checked.status).toBe("completed");
+    });
+  });
+
   describe("persistence", () => {
     it("should persist and load workflow state from KV", async () => {
       const plan = makePlan({ mode: "review_before_run" });

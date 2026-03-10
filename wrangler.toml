@@ -74,3 +74,7 @@ DEFAULT_EXECUTION_MODE = "review_before_run"
 DEFAULT_APPETITE = "balanced"
 WORKFLOW_TIMEOUT_MS = "300000"
 MAX_SKILL_CHAIN_DEPTH = "10"
+
+# --- Cron Triggers (workflow timeout sweep) ---
+[triggers]
+crons = ["*/5 * * * *"]

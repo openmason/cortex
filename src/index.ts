@@ -10,6 +10,7 @@ import sessionRoutes from "./routes/sessions";
 import skillRoutes from "./routes/skills";
 import { handleForgeMessage } from "./queues/forge-consumer";
 import { handleCogniumMessage } from "./queues/cognium-consumer";
+import { WorkflowEngine } from "./workflow/engine";
 
 // Re-export the Durable Object class (required by wrangler)
 export { WorkflowDurableObject } from "./workflow/durable-object";
@@ -94,6 +95,34 @@ async function handleScheduled(
   ctx: ExecutionContext,
 ): Promise<void> {
   console.log(`[cron] Triggered at ${new Date(event.scheduledTime).toISOString()}`);
+
+  // Sweep paused workflows that have exceeded their timeout
+  try {
+    const engine = new WorkflowEngine(env);
+    const list = await env.WORKFLOW_STATE.list({ prefix: "workflow:" });
+    let expired = 0;
+
+    for (const key of list.keys) {
+      const raw = await env.WORKFLOW_STATE.get(key.name);
+      if (!raw) continue;
+
+      const state = JSON.parse(raw);
+      if (
+        (state.status === "paused_for_review" || state.status === "paused_at_step") &&
+        state.timeoutAt &&
+        new Date(state.timeoutAt).getTime() <= Date.now()
+      ) {
+        await engine.checkAndApplyTimeout(state);
+        expired++;
+      }
+    }
+
+    if (expired > 0) {
+      console.log(`[cron] Timed out ${expired} paused workflow(s)`);
+    }
+  } catch (err) {
+    console.error("[cron] Sweep failed:", err);
+  }
 }
 
 // ---------------------------------------------------------------------------

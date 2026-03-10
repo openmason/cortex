@@ -166,6 +166,7 @@ export interface WorkflowState {
   startedAt: string;
   completedAt?: string;
   pausedAt?: string;
+  timeoutAt?: string;
   resumeData?: unknown;
   error?: string;
 }

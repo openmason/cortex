@@ -1,9 +1,10 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
-import type { Env, AppVariables, RunRequest, ResumeRequest, SSEEvent } from "../types";
+import type { Env, AppVariables, RunRequest, WorkflowState, ResumeRequest, SSEEvent } from "../types";
 import { SupervisorAgent } from "../agents/supervisor";
 import { LLMClient, MODELS } from "../clients/llm";
+import { WorkflowEngine } from "../workflow/engine";
 import { requireScope } from "../middleware/auth";
 
 const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
@@ -135,7 +136,19 @@ app.get("/run/:workflowId", async (c) => {
     return c.json({ error: "Workflow not found" }, 404);
   }
 
-  return c.json(JSON.parse(raw));
+  let state: WorkflowState = JSON.parse(raw);
+
+  // Lazy timeout: if paused and expired, mark as timed_out
+  if (
+    (state.status === "paused_for_review" || state.status === "paused_at_step") &&
+    state.timeoutAt &&
+    new Date(state.timeoutAt).getTime() <= Date.now()
+  ) {
+    const engine = new WorkflowEngine(c.env);
+    state = await engine.checkAndApplyTimeout(state);
+  }
+
+  return c.json(state);
 });
 
 // ---------------------------------------------------------------------------

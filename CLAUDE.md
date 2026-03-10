@@ -81,9 +81,17 @@ Cloudflare Workers-based agent runtime that orchestrates skill discovery, planni
 - Zero behavior change until a `tenant_policies` row is inserted
 - Admin endpoints: `PUT /admin/policies`, `GET /admin/policies/:tenantId/:product`
 
+## Workflow Timeout Enforcement
+- Paused workflows (`paused_for_review`, `paused_at_step`) get `timeoutAt` set to `now + WORKFLOW_TIMEOUT_MS` (default 5 min)
+- **Lazy check**: `GET /v1/run/:id` checks `timeoutAt` and transitions to `timed_out` if expired
+- **Resume guard**: `engine.resume()` checks timeout before allowing execution
+- **Cron sweep**: `*/5 * * * *` cron lists `workflow:*` KV keys, expires any paused workflows past `timeoutAt`
+- Backward compat: old states without `timeoutAt` are never lazily timed out
+
 ## Testing
-- 371 unit tests passing across 24 test files (`npx vitest run`)
+- 376 unit tests passing across 24 test files (`npx vitest run`)
 - Local dev tested with `npx wrangler dev` — health, models, and full run request all work
+- E2E smoke test: `ADMIN_SECRET=<secret> npx tsx scripts/smoke-test.ts` (9 tests against live deployment)
 - Sample query script: `scripts/sample-query.ts` (mocked, in-process)
 
 ## Key Files
@@ -105,15 +113,19 @@ Cloudflare Workers-based agent runtime that orchestrates skill discovery, planni
 - `src/routes/health.ts` — /health
 - `src/queues/forge-consumer.ts` — auto-distill and generate handlers
 - `src/queues/cognium-consumer.ts` — scan and trust update handlers
-- `wrangler.toml` — all bindings with real IDs
+- `scripts/smoke-test.ts` — E2E smoke test against live deployment
+- `wrangler.toml` — all bindings with real IDs, cron trigger
 - `.dev.vars` — local secrets (LLMPROXY_API_KEY, DAYTONA_API_KEY, DATABASE_URL, ADMIN_SECRET)
 
 ## Spec
 Master specification: `cortex-specification.md`
 
+## Known Issues
+- **KV free-tier daily write limit** — `SESSION_CACHE` KV hits the daily write cap, causing health check degradation and API key creation failures. Needs paid Workers plan or moving API keys to Neon DB.
+
 ## Next Steps (Prioritized)
-1. End-to-end workflow test with real LLM + Runics
+1. Move API key storage from KV to Neon DB (fixes free-tier limit)
 2. Rate limiting / usage tracking per API key
 3. Observability — structured logging, Cloudflare Analytics Engine
 4. Webhook/callback support for long-running workflows
-5. Workflow timeout enforcement via Durable Objects
+5. Tenant policy loading from DB (currently returns defaults)

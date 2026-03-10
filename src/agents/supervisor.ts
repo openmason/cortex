@@ -618,6 +618,8 @@ Be concise. Focus on finding and executing the right skills.`;
       }
       case "failed":
         return state.error ?? "Workflow failed.";
+      case "timed_out":
+        return state.error ?? "Workflow timed out waiting for review.";
       default:
         return `Workflow status: ${state.status}`;
     }

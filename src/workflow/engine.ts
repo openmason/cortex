@@ -98,6 +98,7 @@ export class WorkflowEngine {
     if (plan.mode === "review_before_run" || plan.mode === "step_by_step") {
       state.status = "paused_for_review";
       state.pausedAt = new Date().toISOString();
+      state.timeoutAt = new Date(Date.now() + this.getTimeoutMs()).toISOString();
       await this.persistState(state);
       return state;
     }
@@ -115,6 +116,12 @@ export class WorkflowEngine {
     modifiedPlan?: WorkflowPlan,
     executionCtx?: ExecutionContext,
   ): Promise<WorkflowState> {
+    // Check timeout before allowing resume
+    state = await this.checkAndApplyTimeout(state);
+    if (state.status === "timed_out") {
+      return state;
+    }
+
     if (!approved) {
       state.status = "failed";
       state.error = "Workflow rejected by human reviewer";
@@ -161,6 +168,7 @@ export class WorkflowEngine {
       if (state.mode === "step_by_step" && i > 0 && i !== resumingAtStep) {
         state.status = "paused_at_step";
         state.pausedAt = new Date().toISOString();
+        state.timeoutAt = new Date(Date.now() + this.getTimeoutMs()).toISOString();
         await this.persistState(state);
         return state;
       }
@@ -303,6 +311,34 @@ export class WorkflowEngine {
     }
 
     return state;
+  }
+
+  /**
+   * Check if a paused workflow has exceeded its timeout.
+   * If expired, transitions to timed_out and persists.
+   */
+  async checkAndApplyTimeout(state: WorkflowState): Promise<WorkflowState> {
+    if (
+      (state.status === "paused_for_review" || state.status === "paused_at_step") &&
+      state.timeoutAt &&
+      new Date(state.timeoutAt).getTime() <= Date.now()
+    ) {
+      state.status = "timed_out";
+      state.error = "Workflow timed out waiting for human review";
+      state.completedAt = new Date().toISOString();
+      await this.persistState(state);
+
+      if (this.repo) {
+        this.repo.updateSession(state).catch((err) =>
+          console.error("[engine] Failed to update timed_out session in DB:", err),
+        );
+      }
+    }
+    return state;
+  }
+
+  private getTimeoutMs(): number {
+    return parseInt(this.env.WORKFLOW_TIMEOUT_MS, 10) || 300_000;
   }
 
   /**
