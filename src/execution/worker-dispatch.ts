@@ -1,4 +1,5 @@
 import type { Env, ExecutionResult, SkillReference } from "../types";
+import { BUILTIN_SKILLS } from "./builtin-skills";
 
 /**
  * L2 Worker Dispatch — execute pure JS/TS skill functions on Cloudflare Workers.
@@ -30,108 +31,6 @@ export interface WorkerSkillModule {
     timeout?: number;
   };
 }
-
-/**
- * Built-in skill implementations — compiled into Cortex for instant execution.
- * Used for first-party skills and testing. Keyed by skill slug.
- */
-const BUILTIN_SKILLS: Record<string, (input: Record<string, unknown>) => Promise<unknown>> = {
-  "mr-complexity-scorer": async (input) => {
-    const code = String(input.code || input.diff || input.text || "");
-    if (!code) return { error: "No code provided. Pass { code: '...' } or { diff: '...' } as input." };
-
-    const lines = code.split("\n");
-    const totalLines = lines.length;
-    const addedLines = lines.filter(l => l.startsWith("+")).length;
-    const removedLines = lines.filter(l => l.startsWith("-")).length;
-    const changedFiles = new Set(lines.filter(l => l.startsWith("diff --git") || l.startsWith("+++") || l.startsWith("---")).map(l => l.split(" ").pop())).size;
-
-    // Complexity heuristics
-    const issues: Array<{severity: string; line: number; message: string}> = [];
-    let complexityScore = 0;
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
-      // Long lines
-      if (line.length > 120) {
-        issues.push({ severity: "warning", line: i + 1, message: `Line exceeds 120 chars (${line.length})` });
-        complexityScore += 1;
-      }
-      // TODO/FIXME/HACK
-      if (/\b(TODO|FIXME|HACK|XXX)\b/.test(line)) {
-        issues.push({ severity: "info", line: i + 1, message: `Contains ${line.match(/\b(TODO|FIXME|HACK|XXX)\b/)![0]} marker` });
-        complexityScore += 2;
-      }
-      // Deeply nested (4+ indentation levels)
-      const indent = lines[i].match(/^(\s*)/)?.[1].length ?? 0;
-      if (indent >= 16) {
-        issues.push({ severity: "warning", line: i + 1, message: "Deep nesting detected (4+ levels)" });
-        complexityScore += 3;
-      }
-      // console.log / debugger
-      if (/\b(console\.(log|debug|warn)|debugger|print\()\b/.test(line)) {
-        issues.push({ severity: "warning", line: i + 1, message: "Debug statement detected" });
-        complexityScore += 2;
-      }
-      // Hardcoded secrets patterns
-      if (/(?:password|secret|api_key|token)\s*[:=]\s*['"][^'"]+['"]/i.test(line)) {
-        issues.push({ severity: "critical", line: i + 1, message: "Possible hardcoded secret/credential" });
-        complexityScore += 10;
-      }
-      // Large functions (rough: function with >50 lines before next function)
-      if (/\b(function |async function |=>\s*\{|\.then\()/.test(line)) {
-        complexityScore += 1;
-      }
-    }
-
-    // Size-based complexity
-    if (totalLines > 500) complexityScore += 5;
-    if (totalLines > 1000) complexityScore += 10;
-
-    const rating = complexityScore <= 5 ? "low" : complexityScore <= 15 ? "medium" : complexityScore <= 30 ? "high" : "critical";
-    const criticalCount = issues.filter(i => i.severity === "critical").length;
-    const warningCount = issues.filter(i => i.severity === "warning").length;
-
-    return {
-      complexity: rating,
-      complexityScore,
-      stats: { totalLines, addedLines, removedLines, changedFiles: changedFiles || 1 },
-      issues: issues.slice(0, 20),
-      counts: { critical: criticalCount, warnings: warningCount, info: issues.length - criticalCount - warningCount },
-      summary: `Complexity: ${rating} (score: ${complexityScore}). Found ${criticalCount} critical, ${warningCount} warnings across ${totalLines} lines.`,
-      recommendation: criticalCount > 0 ? "Block merge — critical issues found." : warningCount > 5 ? "Request changes — multiple warnings." : "Approve — looks good.",
-    };
-  },
-
-  "emotion-state": async (input) => {
-    const text = String(input.text || input.prompt || input.content || "").toLowerCase();
-    if (!text) return { error: "No text provided. Pass { text: '...' } as input." };
-
-    const positive = ["love", "great", "amazing", "excellent", "wonderful", "fantastic", "awesome", "good", "happy", "best", "perfect", "beautiful", "enjoy", "pleased", "satisfied", "recommend"];
-    const negative = ["hate", "terrible", "awful", "horrible", "bad", "worst", "broken", "poor", "disappointing", "frustrated", "angry", "useless", "waste", "fail", "sucks", "rubbish"];
-
-    const words = text.split(/\s+/);
-    let posCount = 0, negCount = 0;
-    const posMatches: string[] = [], negMatches: string[] = [];
-
-    for (const w of words) {
-      const c = w.replace(/[^a-z]/g, "");
-      if (positive.includes(c)) { posCount++; posMatches.push(c); }
-      if (negative.includes(c)) { negCount++; negMatches.push(c); }
-    }
-
-    const total = posCount + negCount;
-    const score = total === 0 ? 0.5 : posCount / total;
-    const sentiment = total === 0 ? "neutral" : score > 0.6 ? "positive" : score < 0.4 ? "negative" : "mixed";
-
-    return {
-      sentiment, score: Math.round(score * 100) / 100,
-      positiveSignals: posMatches, negativeSignals: negMatches,
-      wordCount: words.length,
-      summary: `Detected ${sentiment} sentiment (score: ${score.toFixed(2)}). Found ${posCount} positive and ${negCount} negative signals.`,
-    };
-  },
-};
 
 export class WorkerDispatch {
   constructor(private env: Env) {}
