@@ -1,7 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
-import { authMiddleware, requireScope } from "../../src/middleware/auth";
 import type { Env, AppVariables } from "../../src/types";
+
+// Mock WorkflowRepository
+const mockGetApiKey = vi.fn().mockResolvedValue(null);
+
+vi.mock("../../src/db/repository", () => ({
+  WorkflowRepository: vi.fn().mockImplementation(() => ({
+    getApiKey: mockGetApiKey,
+    createApiKey: vi.fn(),
+    revokeApiKey: vi.fn(),
+  })),
+}));
+
+import { authMiddleware, requireScope } from "../../src/middleware/auth";
 
 const TEST_KEY = "ctx_testapikey1234567890abcdef";
 
@@ -76,6 +88,7 @@ describe("Auth Middleware", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     env = makeMockEnv();
+    mockGetApiKey.mockResolvedValue(null);
   });
 
   it("should return 401 when no Authorization header", async () => {
@@ -110,7 +123,7 @@ describe("Auth Middleware", () => {
     expect(res.status).toBe(401);
   });
 
-  it("should return 401 when API key not found in KV", async () => {
+  it("should return 401 when key not found in KV or DB", async () => {
     const app = makeApp();
     const res = await app.fetch(
       new Request("http://localhost/test", {
@@ -124,10 +137,11 @@ describe("Auth Middleware", () => {
     expect(body.error).toMatch(/Invalid API key/);
   });
 
-  it("should return 500 when KV value is corrupted JSON", async () => {
+  it("should fall through to DB when KV value is corrupted JSON", async () => {
     env = makeMockEnv(false);
     (env.SESSION_CACHE.get as any).mockResolvedValue("not-json{{{");
     const app = makeApp();
+    // DB also returns null → 401
     const res = await app.fetch(
       new Request("http://localhost/test", {
         headers: { Authorization: "Bearer ctx_baddata" },
@@ -135,12 +149,10 @@ describe("Auth Middleware", () => {
       env,
       ctx,
     );
-    expect(res.status).toBe(500);
-    const body = (await res.json()) as any;
-    expect(body.error).toMatch(/Corrupted/);
+    expect(res.status).toBe(401);
   });
 
-  it("should inject context variables on valid key", async () => {
+  it("should inject context variables on valid KV key", async () => {
     const app = makeApp();
     const res = await app.fetch(
       new Request("http://localhost/test", {
@@ -168,6 +180,88 @@ describe("Auth Middleware", () => {
     );
     expect(env.SESSION_CACHE.get).toHaveBeenCalledWith(`apikey:${TEST_KEY}`);
   });
+
+  // -------------------------------------------------------------------------
+  // DB fallback tests
+  // -------------------------------------------------------------------------
+
+  it("should query DB when KV misses and return 200 on DB hit", async () => {
+    env = makeMockEnv(false); // No key in KV
+    mockGetApiKey.mockResolvedValue({
+      tenantId: "db-tenant",
+      userId: "db-user",
+      product: "costaff",
+      scopes: ["run"],
+      createdAt: new Date().toISOString(),
+    });
+
+    const app = makeApp();
+    const res = await app.fetch(
+      new Request("http://localhost/test", {
+        headers: { Authorization: "Bearer ctx_dbonly" },
+      }),
+      env,
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body.tenantId).toBe("db-tenant");
+    expect(body.product).toBe("costaff");
+  });
+
+  it("should backfill KV cache on DB hit", async () => {
+    env = makeMockEnv(false);
+    mockGetApiKey.mockResolvedValue({
+      tenantId: "db-tenant",
+      userId: "db-user",
+      product: "costaff",
+      scopes: ["run"],
+      createdAt: new Date().toISOString(),
+    });
+
+    const app = makeApp();
+    await app.fetch(
+      new Request("http://localhost/test", {
+        headers: { Authorization: "Bearer ctx_dbonly" },
+      }),
+      env,
+      ctx,
+    );
+
+    expect(env.SESSION_CACHE.put).toHaveBeenCalledWith(
+      "apikey:ctx_dbonly",
+      expect.any(String),
+      { expirationTtl: 300 },
+    );
+  });
+
+  it("should return 401 when both KV and DB miss", async () => {
+    env = makeMockEnv(false);
+    mockGetApiKey.mockResolvedValue(null);
+
+    const app = makeApp();
+    const res = await app.fetch(
+      new Request("http://localhost/test", {
+        headers: { Authorization: "Bearer ctx_nowhere" },
+      }),
+      env,
+      ctx,
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it("should not query DB when KV cache hits", async () => {
+    const app = makeApp();
+    await app.fetch(
+      new Request("http://localhost/test", {
+        headers: { Authorization: `Bearer ${TEST_KEY}` },
+      }),
+      env,
+      ctx,
+    );
+    // DB should NOT have been called since KV hit
+    expect(mockGetApiKey).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -188,6 +282,7 @@ describe("requireScope", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     env = makeMockEnv(); // key has scopes: ["run", "sessions"]
+    mockGetApiKey.mockResolvedValue(null);
   });
 
   it("should pass when key has the required scope", async () => {

@@ -1,4 +1,24 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
+const mockCreateApiKey = vi.fn().mockResolvedValue(undefined);
+const mockRevokeApiKey = vi.fn().mockResolvedValue(undefined);
+const mockGetApiKey = vi.fn().mockResolvedValue(null);
+
+vi.mock("../../src/db/repository", () => ({
+  WorkflowRepository: vi.fn().mockImplementation(() => ({
+    createApiKey: mockCreateApiKey,
+    revokeApiKey: mockRevokeApiKey,
+    getApiKey: mockGetApiKey,
+    loadPolicy: vi.fn().mockResolvedValue(null),
+    upsertPolicy: vi.fn(),
+    createSession: vi.fn(),
+    updateSession: vi.fn(),
+    recordStepExecution: vi.fn(),
+    writeTrace: vi.fn(),
+    markTraceAsSaved: vi.fn(),
+  })),
+}));
+
 import app from "../../src/index";
 import type { Env } from "../../src/types";
 
@@ -57,6 +77,9 @@ describe("Admin Routes", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockCreateApiKey.mockResolvedValue(undefined);
+    mockRevokeApiKey.mockResolvedValue(undefined);
+    mockGetApiKey.mockResolvedValue(null);
     env = makeMockEnv();
   });
 
@@ -125,7 +148,19 @@ describe("Admin Routes", () => {
       expect(body.scopes).toEqual(["run", "sessions"]);
       expect(body.createdAt).toBeDefined();
 
-      // Verify it was stored in KV
+      // Verify it was persisted to DB
+      expect(mockCreateApiKey).toHaveBeenCalledOnce();
+      expect(mockCreateApiKey).toHaveBeenCalledWith(
+        body.key,
+        expect.objectContaining({
+          tenantId: "t1",
+          userId: "u1",
+          product: "bombastic",
+          scopes: ["run", "sessions"],
+        }),
+      );
+
+      // Verify KV write-through cache
       expect(env.SESSION_CACHE.put).toHaveBeenCalledOnce();
       const putCall = (env.SESSION_CACHE.put as any).mock.calls[0];
       expect(putCall[0]).toBe(`apikey:${body.key}`);
@@ -151,6 +186,17 @@ describe("Admin Routes", () => {
       const body = (await res.json()) as any;
       expect(body.scopes).toEqual(["run"]);
       expect(body.product).toBe("controlcenter");
+
+      // Verify DB persistence with custom scopes
+      expect(mockCreateApiKey).toHaveBeenCalledWith(
+        body.key,
+        expect.objectContaining({
+          tenantId: "t2",
+          userId: "u2",
+          product: "controlcenter",
+          scopes: ["run"],
+        }),
+      );
     });
 
     it("should reject invalid product", async () => {
@@ -206,6 +252,12 @@ describe("Admin Routes", () => {
       expect(res.status).toBe(200);
       const body = (await res.json()) as any;
       expect(body.deleted).toBe(true);
+
+      // Verify DB soft-delete
+      expect(mockRevokeApiKey).toHaveBeenCalledOnce();
+      expect(mockRevokeApiKey).toHaveBeenCalledWith("ctx_somekey12345");
+
+      // Verify KV cache eviction
       expect(env.SESSION_CACHE.delete).toHaveBeenCalledWith(
         "apikey:ctx_somekey12345",
       );

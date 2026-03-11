@@ -124,3 +124,24 @@ export const tenantPolicies = pgTable(
     index("idx_tenant_policies_tenant").on(table.tenantId, table.product),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// API Keys
+// ---------------------------------------------------------------------------
+export const apiKeys = pgTable(
+  "api_keys",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    key: text("key").notNull().unique(),
+    tenantId: text("tenant_id").notNull(),
+    userId: text("user_id").notNull(),
+    product: text("product").notNull(),
+    scopes: jsonb("scopes").notNull().$type<string[]>(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  },
+  (table) => [
+    index("idx_api_keys_key").on(table.key),
+    index("idx_api_keys_tenant").on(table.tenantId),
+  ],
+);

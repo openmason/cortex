@@ -1,4 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// Mock WorkflowRepository to avoid real DB calls in auth middleware
+vi.mock("../../src/db/repository", () => ({
+  WorkflowRepository: vi.fn().mockImplementation(() => ({
+    getApiKey: vi.fn().mockResolvedValue(null),
+    createApiKey: vi.fn(),
+    revokeApiKey: vi.fn(),
+    loadPolicy: vi.fn().mockResolvedValue(null),
+    createSession: vi.fn(),
+    updateSession: vi.fn(),
+    recordStepExecution: vi.fn(),
+    writeTrace: vi.fn(),
+    markTraceAsSaved: vi.fn(),
+    getSessionByWorkflowId: vi.fn().mockResolvedValue(null),
+  })),
+}));
+
 import app from "../../src/index";
 import type { Env } from "../../src/types";
 

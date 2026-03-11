@@ -18,6 +18,9 @@ vi.mock("../../src/db/repository", () => {
     recordStepExecution: vi.fn(),
     writeTrace: vi.fn(),
     markTraceAsSaved: vi.fn(),
+    getApiKey: vi.fn().mockResolvedValue(null),
+    createApiKey: vi.fn(),
+    revokeApiKey: vi.fn(),
   };
   return {
     WorkflowRepository: vi.fn().mockImplementation(() => mockRepo),

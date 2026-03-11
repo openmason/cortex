@@ -1,8 +1,8 @@
-import { drizzle } from "drizzle-orm/neon-http";
-import { neon } from "@neondatabase/serverless";
-import { eq, and, desc } from "drizzle-orm";
-import type { Env, WorkflowState, WorkflowPlan, ExecutionResult } from "../types";
-import { workflowSessions, workflowStepExecutions, executionTraces, tenantPolicies } from "./schema";
+import { drizzle } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
+import { eq, and, desc, isNull } from "drizzle-orm";
+import type { Env, WorkflowState, WorkflowPlan, ExecutionResult, ApiKeyData } from "../types";
+import { workflowSessions, workflowStepExecutions, executionTraces, tenantPolicies, apiKeys } from "./schema";
 import type { TenantPolicy } from "../policy/engine";
 
 /**
@@ -19,8 +19,9 @@ export class WorkflowRepository {
   private db;
 
   constructor(env: Env) {
-    // Hyperdrive exposes a connectionString that Neon's HTTP driver can use
-    const sql = neon(env.HYPERDRIVE.connectionString);
+    // Hyperdrive exposes a postgres:// connectionString for edge connection pooling.
+    // postgres.js (not the Neon HTTP driver) is required for Hyperdrive compatibility.
+    const sql = postgres(env.HYPERDRIVE.connectionString, { prepare: false });
     this.db = drizzle(sql);
   }
 
@@ -315,6 +316,71 @@ export class WorkflowRepository {
     } catch (err) {
       console.error("[db] Failed to get session trace:", err);
       return null;
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // API Keys
+  // -----------------------------------------------------------------------
+
+  /**
+   * Insert a new API key.
+   */
+  async createApiKey(key: string, data: ApiKeyData): Promise<void> {
+    try {
+      await this.db.insert(apiKeys).values({
+        key,
+        tenantId: data.tenantId,
+        userId: data.userId,
+        product: data.product,
+        scopes: data.scopes,
+        createdAt: new Date(data.createdAt),
+      });
+    } catch (err) {
+      console.error("[db] Failed to create API key:", err);
+      throw err;
+    }
+  }
+
+  /**
+   * Look up an API key. Returns null if not found or revoked.
+   */
+  async getApiKey(key: string): Promise<ApiKeyData | null> {
+    try {
+      const rows = await this.db
+        .select()
+        .from(apiKeys)
+        .where(and(eq(apiKeys.key, key), isNull(apiKeys.revokedAt)))
+        .limit(1);
+
+      if (rows.length === 0) return null;
+
+      const row = rows[0];
+      return {
+        tenantId: row.tenantId,
+        userId: row.userId,
+        product: row.product as ApiKeyData["product"],
+        scopes: row.scopes as string[],
+        createdAt: row.createdAt?.toISOString() ?? new Date().toISOString(),
+      };
+    } catch (err) {
+      console.error("[db] Failed to get API key:", err);
+      return null;
+    }
+  }
+
+  /**
+   * Soft-revoke an API key by setting revokedAt.
+   */
+  async revokeApiKey(key: string): Promise<void> {
+    try {
+      await this.db
+        .update(apiKeys)
+        .set({ revokedAt: new Date() })
+        .where(eq(apiKeys.key, key));
+    } catch (err) {
+      console.error("[db] Failed to revoke API key:", err);
+      throw err;
     }
   }
 

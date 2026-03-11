@@ -43,7 +43,20 @@ app.post("/api-keys", async (c) => {
     createdAt: new Date().toISOString(),
   };
 
-  await c.env.SESSION_CACHE.put(`apikey:${key}`, JSON.stringify(data));
+  // Write to DB (source of truth)
+  const repo = new WorkflowRepository(c.env);
+  await repo.createApiKey(key, data);
+
+  // Write-through to KV cache (best-effort)
+  try {
+    await c.env.SESSION_CACHE.put(
+      `apikey:${key}`,
+      JSON.stringify(data),
+      { expirationTtl: 300 },
+    );
+  } catch {
+    // Non-critical — auth middleware will backfill from DB on miss
+  }
 
   return c.json({ key, ...data }, 201);
 });
@@ -53,7 +66,18 @@ app.post("/api-keys", async (c) => {
 // ---------------------------------------------------------------------------
 app.delete("/api-keys/:key", async (c) => {
   const key = c.req.param("key");
-  await c.env.SESSION_CACHE.delete(`apikey:${key}`);
+
+  // Revoke in DB (source of truth)
+  const repo = new WorkflowRepository(c.env);
+  await repo.revokeApiKey(key);
+
+  // Invalidate KV cache (best-effort)
+  try {
+    await c.env.SESSION_CACHE.delete(`apikey:${key}`);
+  } catch {
+    // Non-critical — TTL will expire the cache entry
+  }
+
   return c.json({ deleted: true });
 });
 
