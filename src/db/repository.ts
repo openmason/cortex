@@ -246,7 +246,7 @@ export class WorkflowRepository {
 
       const rows = await query;
 
-      // Apply filters in-memory (Drizzle dynamic where chaining is cumbersome with neon-http)
+      // Apply filters in-memory (simpler than dynamic where chaining)
       let filtered = rows;
       if (filters?.status) {
         filtered = filtered.filter((r) => r.status === filters.status);
