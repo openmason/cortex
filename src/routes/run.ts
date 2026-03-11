@@ -130,13 +130,12 @@ app.post("/run/:workflowId/resume", async (c) => {
 // ---------------------------------------------------------------------------
 app.get("/run/:workflowId", async (c) => {
   const workflowId = c.req.param("workflowId");
-  const raw = await c.env.WORKFLOW_STATE.get(`workflow:${workflowId}`);
+  const engine = new WorkflowEngine(c.env);
+  let state = await engine.loadState(workflowId);
 
-  if (!raw) {
+  if (!state) {
     return c.json({ error: "Workflow not found" }, 404);
   }
-
-  let state: WorkflowState = JSON.parse(raw);
 
   // Lazy timeout: if paused and expired, mark as timed_out
   if (
@@ -144,7 +143,6 @@ app.get("/run/:workflowId", async (c) => {
     state.timeoutAt &&
     new Date(state.timeoutAt).getTime() <= Date.now()
   ) {
-    const engine = new WorkflowEngine(c.env);
     state = await engine.checkAndApplyTimeout(state);
   }
 

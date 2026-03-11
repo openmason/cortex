@@ -9,7 +9,7 @@ Cloudflare Workers-based agent runtime that orchestrates skill discovery, planni
 - **Execution Router** (`src/execution/router.ts`) — dispatches to 5 layers: mcp-remote, instructions, worker, container, composite
 - **Policy Engine** (`src/policy/engine.ts`) — tenant-level trust checks, appetite thresholds, sensitive categories
 - **Queue Consumers** — Forge (auto-distill, generate) and Cognium (scan, trust update)
-- **DB Repository** (`src/db/repository.ts`) — Drizzle/Neon/Hyperdrive for durable workflow records
+- **DB Repository** (`src/db/repository.ts`) — Drizzle/postgres.js/Hyperdrive for durable workflow records and API key storage
 
 ## LLM Proxy
 - URL: `https://llmproxy.xus.one` (OpenAI-compatible, routed via LiteLLM → OpenRouter / Cloudflare Workers AI)
@@ -30,12 +30,15 @@ Cloudflare Workers-based agent runtime that orchestrates skill discovery, planni
 ## Deploy Status
 - **Live at**: `https://cortex.phantoms.workers.dev`
 - Secrets set: LLMPROXY_API_KEY, DAYTONA_API_KEY (placeholder), DATABASE_URL, ADMIN_SECRET
-- Schema already pushed to Neon DB (4 tables, 8 indexes)
+- Schema already pushed to Neon DB (5 tables: workflow_sessions, step_executions, execution_traces, tenant_policies, api_keys)
 - Durable Objects use `new_sqlite_classes` migration (required for free plan)
 
 ## Auth & Scopes
 - Bearer API key auth on all `/v1/*` routes via `src/middleware/auth.ts`
-- Keys stored in `SESSION_CACHE` KV: `apikey:{key}` → `{tenantId, userId, product, scopes}`
+- **API key storage**: Neon DB (`api_keys` table) is source of truth; KV is a 5-min read-through cache
+  - Write path: DB first → KV write-through (best-effort)
+  - Read path (auth): KV cache → DB fallback → backfill KV
+  - Revoke: soft-delete in DB (`revokedAt` timestamp) + delete from KV
 - Key format: `ctx_` + 32 hex chars
 - Admin routes (`/admin/*`) protected by `ADMIN_SECRET` env var
 - Create keys: `POST /admin/api-keys` with `{tenantId, userId, product, scopes?}`
@@ -51,7 +54,7 @@ Cloudflare Workers-based agent runtime that orchestrates skill discovery, planni
 
 ## API Endpoints
 - `GET /` — Service info
-- `GET /health` — Health check (KV + Runics)
+- `GET /health` — Health check (KV + DB/Hyperdrive + Runics)
 - `POST /v1/run` — Start workflow (JSON response)
 - `POST /v1/run/stream` — Start workflow (SSE streaming)
 - `GET /v1/run/:id` — Workflow status
@@ -81,6 +84,10 @@ Cloudflare Workers-based agent runtime that orchestrates skill discovery, planni
 - Zero behavior change until a `tenant_policies` row is inserted
 - Admin endpoints: `PUT /admin/policies`, `GET /admin/policies/:tenantId/:product`
 
+## Workflow State Fallback
+- `GET /v1/run/:id` uses `engine.loadState()`: KV cache → DB fallback (reconstructs `WorkflowState` from `workflow_sessions` row)
+- `saveAsSkill` also uses `engine.loadState()` for the same fallback
+
 ## Workflow Timeout Enforcement
 - Paused workflows (`paused_for_review`, `paused_at_step`) get `timeoutAt` set to `now + WORKFLOW_TIMEOUT_MS` (default 5 min)
 - **Lazy check**: `GET /v1/run/:id` checks `timeoutAt` and transitions to `timed_out` if expired
@@ -89,7 +96,7 @@ Cloudflare Workers-based agent runtime that orchestrates skill discovery, planni
 - Backward compat: old states without `timeoutAt` are never lazily timed out
 
 ## Testing
-- 376 unit tests passing across 24 test files (`npx vitest run`)
+- 380 unit tests passing across 24 test files (`npx vitest run`)
 - Local dev tested with `npx wrangler dev` — health, models, and full run request all work
 - E2E smoke test: `ADMIN_SECRET=<secret> npx tsx scripts/smoke-test.ts` (9 tests against live deployment)
 - Sample query script: `scripts/sample-query.ts` (mocked, in-process)
@@ -103,8 +110,8 @@ Cloudflare Workers-based agent runtime that orchestrates skill discovery, planni
 - `src/clients/llm.ts` — LLM proxy client (chat, agentLoop with onEvent, listModels)
 - `src/workflow/engine.ts` — workflow orchestration with DB persistence and SSE events
 - `src/workflow/input-mapping.ts` — $prev/$step.N resolver
-- `src/db/schema.ts` — Drizzle schema (workflow_sessions, step_executions, execution_traces, tenant_policies)
-- `src/db/repository.ts` — DB operations (sessions, policies, traces)
+- `src/db/schema.ts` — Drizzle schema (workflow_sessions, step_executions, execution_traces, tenant_policies, api_keys)
+- `src/db/repository.ts` — DB operations (sessions, policies, traces, API keys)
 - `src/routes/run.ts` — /v1/run, /v1/run/stream, /v1/run/:id, resume, save, models
 - `src/routes/sessions.ts` — /v1/sessions, /v1/sessions/:id, /v1/sessions/:id/trace
 - `src/routes/skills.ts` — /v1/skills/composites CRUD (list, detail, update, deprecate, fork)
@@ -120,12 +127,17 @@ Cloudflare Workers-based agent runtime that orchestrates skill discovery, planni
 ## Spec
 Master specification: `cortex-specification.md`
 
+## DB Driver
+- Uses `postgres` (postgres.js) with `drizzle-orm/postgres-js` — NOT `@neondatabase/serverless`
+- The Neon HTTP driver (`neon()`) bypasses Hyperdrive; `postgres.js` is required for Hyperdrive connection pooling
+- `{ prepare: false }` is required — Hyperdrive handles prepared statement caching
+- `nodejs_compat` compatibility flag enabled in `wrangler.toml`
+
 ## Known Issues
-- **KV free-tier daily write limit** — `SESSION_CACHE` KV hits the daily write cap, causing health check degradation and API key creation failures. Needs paid Workers plan or moving API keys to Neon DB.
+- **KV free-tier daily write limit** — `WORKFLOW_STATE` KV still hits the daily write cap for workflow state writes and health checks. API keys are now in Neon DB (resolved). Health check uses read-only KV check to avoid burning writes.
 
 ## Next Steps (Prioritized)
-1. Move API key storage from KV to Neon DB (fixes free-tier limit)
-2. Rate limiting / usage tracking per API key
-3. Observability — structured logging, Cloudflare Analytics Engine
-4. Webhook/callback support for long-running workflows
-5. Tenant policy loading from DB (currently returns defaults)
+1. Rate limiting / usage tracking per API key
+2. Observability — structured logging, Cloudflare Analytics Engine
+3. Webhook/callback support for long-running workflows
+4. Tenant policy loading from DB (currently returns defaults)

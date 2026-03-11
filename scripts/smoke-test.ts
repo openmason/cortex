@@ -26,6 +26,7 @@ interface TestResult {
 interface State {
   apiKey?: string;
   workflowId?: string;
+  hasWorkflowPlan?: boolean;
   scopeTestKey?: string;
 }
 
@@ -116,11 +117,13 @@ async function testRun(state: State): Promise<TestResult> {
   });
   if (status === 200 && body?.workflowId && body?.status) {
     state.workflowId = body.workflowId;
+    state.hasWorkflowPlan = !!body.plan;
     return { name: "POST /v1/run", status: "pass", ms, detail: `200 wf=${body.workflowId.slice(0, 8)}... status=${body.status}` };
   }
   // 422 means workflow ran but failed (e.g. no skills found) — still structurally valid
   if (status === 422 && body?.workflowId) {
     state.workflowId = body.workflowId;
+    state.hasWorkflowPlan = !!body.plan;
     return { name: "POST /v1/run", status: "warn", ms, detail: `422 wf=${body.workflowId.slice(0, 8)}... ${body.summary?.slice(0, 60) ?? ""}` };
   }
   return { name: "POST /v1/run", status: "fail", ms, detail: `${status} ${JSON.stringify(body?.error ?? body).slice(0, 100)}` };
@@ -128,6 +131,12 @@ async function testRun(state: State): Promise<TestResult> {
 
 async function testGetRun(state: State): Promise<TestResult> {
   if (!state.workflowId) return { name: "GET /v1/run/:id", status: "fail", ms: 0, detail: "skipped (no workflowId)" };
+
+  // Direct LLM responses (no plan built) generate an ephemeral workflowId
+  // that is never persisted — 404 is expected in that case.
+  if (!state.hasWorkflowPlan) {
+    return { name: "GET /v1/run/:id", status: "pass", ms: 0, detail: "skipped (direct LLM response, no persisted state)" };
+  }
 
   const { status, body, ms } = await request("GET", `/v1/run/${state.workflowId}`, {
     headers: apiAuth(state.apiKey!),

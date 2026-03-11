@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import postgres from "postgres";
 import type { Env } from "../types";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -6,13 +7,24 @@ const app = new Hono<{ Bindings: Env }>();
 app.get("/health", async (c) => {
   const checks: Record<string, { ok: boolean; latencyMs?: number; error?: string }> = {};
 
-  // KV check
+  // KV check (read-only to avoid burning free-tier writes)
   const kvStart = Date.now();
   try {
-    await c.env.WORKFLOW_STATE.put("health:ping", "ok", { expirationTtl: 60 });
+    await c.env.WORKFLOW_STATE.get("health:ping");
     checks.kv = { ok: true, latencyMs: Date.now() - kvStart };
   } catch (err) {
     checks.kv = { ok: false, latencyMs: Date.now() - kvStart, error: String(err) };
+  }
+
+  // DB check via Hyperdrive
+  const dbStart = Date.now();
+  try {
+    const sql = postgres(c.env.HYPERDRIVE.connectionString, { prepare: false });
+    await sql`SELECT 1`;
+    await sql.end();
+    checks.db = { ok: true, latencyMs: Date.now() - dbStart };
+  } catch (err) {
+    checks.db = { ok: false, latencyMs: Date.now() - dbStart, error: String(err) };
   }
 
   // Runics check (use service binding if available to avoid error 1042)
