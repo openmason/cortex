@@ -23,7 +23,7 @@ function makeMockEnv(): Env {
     ENVIRONMENT: "test",
     RUNICS_URL: "https://runics.test",
     COGNIUM_URL: "https://cognium.test",
-    DAYTONA_URL: "https://daytona.test",
+    DAYTONA_TARGET: "us",
     LLM_MODEL: "test-model",
     DEFAULT_EXECUTION_MODE: "review_before_run",
     DEFAULT_APPETITE: "balanced",

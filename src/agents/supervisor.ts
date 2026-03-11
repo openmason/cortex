@@ -93,7 +93,7 @@ export class SupervisorAgent {
     }
 
     // Create tool executor for this session
-    const toolExecutor = new ToolExecutor(this.env, tenant);
+    const toolExecutor = new ToolExecutor(this.env, tenant, this.llm);
     const tools = getToolsForProduct(request.product);
 
     // Build messages with conversation history
@@ -112,7 +112,7 @@ export class SupervisorAgent {
         messages,
         tools,
         (name, args) => toolExecutor.execute(name, args, executionCtx),
-        { maxTurns: 8, temperature: 0.2 },
+        { model: this.env.TOOL_CALL_MODEL, maxTurns: 8, temperature: 0.2 },
       );
     } catch (err) {
       return {
@@ -303,7 +303,7 @@ export class SupervisorAgent {
       data: { conversationId, isNew: !request.conversationId, turnCount: convState.turnCount },
     });
 
-    const toolExecutor = new ToolExecutor(this.env, tenant);
+    const toolExecutor = new ToolExecutor(this.env, tenant, this.llm);
     const tools = getToolsForProduct(request.product);
 
     // Build messages with conversation history
@@ -323,7 +323,7 @@ export class SupervisorAgent {
         messages,
         tools,
         (name, args) => toolExecutor.execute(name, args, executionCtx),
-        { maxTurns: 8, temperature: 0.2, onEvent },
+        { model: this.env.TOOL_CALL_MODEL, maxTurns: 8, temperature: 0.2, onEvent },
       );
     } catch (err) {
       const errorMsg = `LLM planning failed: ${err instanceof Error ? err.message : String(err)}`;
@@ -455,11 +455,13 @@ export class SupervisorAgent {
 ## Instructions
 1. Use findSkill to search for skills that match the user's request.
 2. ${tenant.product !== "bombastic" ? "Use checkPolicy to verify each skill is allowed by the tenant's policy." : "Bombastic mode — no policy checks needed."}
-3. Use buildPlan to create an execution plan from the discovered skills.
-4. If a single simple skill suffices, you may use invokeSkill to run it directly.
-5. After calling buildPlan or invokeSkill, provide a brief summary of what will happen.
+3. ALWAYS execute skills — never just describe what you would do. After findSkill returns results, you MUST either:
+   a. Call invokeSkill directly for simple single-skill tasks, OR
+   b. Call buildPlan to create a multi-step execution plan.
+4. After invokeSkill completes, summarize the actual result to the user.
+5. If invokeSkill fails, try a different skill from the findSkill results.
 
-Be concise. Focus on finding and executing the right skills.`;
+IMPORTANT: You must call tools to completion. Do NOT stop after findSkill — always follow up with invokeSkill or buildPlan.`;
   }
 
   /**

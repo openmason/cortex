@@ -8,8 +8,26 @@ Cloudflare Workers-based agent runtime that orchestrates skill discovery, planni
 - **Workflow Engine** (`src/workflow/engine.ts`) — orchestrates multi-step skill execution with pause/resume, input mapping ($prev, $step.N)
 - **Execution Router** (`src/execution/router.ts`) — dispatches to 5 layers: mcp-remote, instructions, worker, container, composite
 - **Policy Engine** (`src/policy/engine.ts`) — tenant-level trust checks, appetite thresholds, sensitive categories
-- **Queue Consumers** — Forge (auto-distill, generate) and Cognium (scan, trust update)
 - **DB Repository** (`src/db/repository.ts`) — Drizzle/postgres.js/Hyperdrive for durable workflow records and API key storage
+
+## Service Boundaries (Important)
+Cortex is the **runtime only**. It orchestrates and executes. It does NOT own trust scanning or skill generation.
+
+- **Cortex → Runics**: Skill discovery (`findSkill`), skill metadata, trust scores (returned by Runics). Cortex reads trust scores from Runics; it never computes or updates them.
+- **Cortex → Daytona**: Container execution (L3 layer). Direct integration — Cortex calls Daytona to run sandboxed skills.
+- **Cortex does NOT talk to Cognium directly**. Trust scoring and security scanning are Runics' responsibility. Runics talks to Cognium internally.
+- **Cortex does NOT embed Forge**. Forge is an independent service that subscribes to workflow events. Cortex emits workflow completion events; Forge consumes them, evaluates traces, and publishes skills to Runics.
+
+```
+Cortex (runtime) ──→ Runics (registry, includes trust scores)
+                 ──→ Daytona (container execution)
+                 ──→ emits workflow events (queue/webhook)
+
+Forge (independent) ──→ subscribes to workflow events
+                    ──→ publishes skills to Runics
+
+Runics (registry) ──→ Cognium (internal trust/scanning)
+```
 
 ## LLM Proxy
 - URL: `https://llmproxy.xus.one` (OpenAI-compatible, routed via LiteLLM → OpenRouter / Cloudflare Workers AI)
@@ -24,7 +42,7 @@ Cloudflare Workers-based agent runtime that orchestrates skill discovery, planni
 - **KV SESSION_CACHE**: ID in `wrangler.toml`
 - **KV WORKFLOW_STATE**: ID in `wrangler.toml`
 - **R2 Bucket**: `cortex-artifacts`
-- **Queues**: `cortex-forge` and `cortex-cognium`
+- **Queues**: `cortex-events` — workflow lifecycle events (completion, save-as-skill). Consumed by Forge independently.
 - **Service Binding**: `RUNICS_SERVICE` → `runics` worker
 
 ## Deploy Status
@@ -63,7 +81,7 @@ Cloudflare Workers-based agent runtime that orchestrates skill discovery, planni
 - `GET /v1/models` — List available LLM models
 - `GET /v1/sessions` — List sessions (tenant-scoped, paginated)
 - `GET /v1/sessions/:id` — Session detail with step executions
-- `GET /v1/sessions/:id/trace` — Execution trace for Forge
+- `GET /v1/sessions/:id/trace` — Execution trace (consumed by Forge independently)
 - `GET /v1/skills/composites` — List composite skills (tenant-scoped, paginated)
 - `GET /v1/skills/composites/:slug` — Composite detail with composition steps
 - `PATCH /v1/skills/composites/:slug` — Update composite metadata
@@ -116,10 +134,7 @@ Cloudflare Workers-based agent runtime that orchestrates skill discovery, planni
 - `src/routes/sessions.ts` — /v1/sessions, /v1/sessions/:id, /v1/sessions/:id/trace
 - `src/routes/skills.ts` — /v1/skills/composites CRUD (list, detail, update, deprecate, fork)
 - `src/routes/admin.ts` — /admin/api-keys, /admin/policies
-- `src/clients/forge.ts` — Forge client (auto-distill, human-distill/save-as-skill)
 - `src/routes/health.ts` — /health
-- `src/queues/forge-consumer.ts` — auto-distill and generate handlers
-- `src/queues/cognium-consumer.ts` — scan and trust update handlers
 - `scripts/smoke-test.ts` — E2E smoke test against live deployment
 - `wrangler.toml` — all bindings with real IDs, cron trigger
 - `.dev.vars` — local secrets (LLMPROXY_API_KEY, DAYTONA_API_KEY, DATABASE_URL, ADMIN_SECRET)
@@ -136,8 +151,21 @@ Master specification: `cortex-specification.md`
 ## Known Issues
 - **KV free-tier daily write limit** — `WORKFLOW_STATE` KV still hits the daily write cap for workflow state writes and health checks. API keys are now in Neon DB (resolved). Health check uses read-only KV check to avoid burning writes.
 
+## Code Cleanup Needed
+The following files still contain direct Cognium/Forge integration that should be decoupled:
+- `src/clients/cognium.ts` — **Remove**. Trust scores come from Runics; Cognium is Runics' concern.
+- `src/clients/forge.ts` — **Remove**. Forge is independent; Cortex emits events, not direct calls.
+- `src/queues/cognium-consumer.ts` — **Remove**. Scanning is Runics→Cognium, not Cortex.
+- `src/queues/forge-consumer.ts` — **Remove**. Forge has its own consumer.
+- `src/agents/tools.ts` — Remove `CogniumClient` import and `cognium.checkTrust()` calls. Trust scores are already on skills from Runics; PolicyEngine handles threshold checks.
+- `src/workflow/engine.ts` — Remove `CogniumClient` and `ForgeClient` imports. Replace `forge.autoDistill()` with a generic event emit (queue message or webhook).
+- `src/agents/supervisor.ts` — Remove `ForgeClient` import. `save-as-skill` should emit an event, not call Forge directly.
+- `src/index.ts` — Remove `handleForgeMessage` and `handleCogniumMessage` imports and queue routing.
+- `src/types.ts` — Remove `FORGE_QUEUE`, `COGNIUM_QUEUE`, `COGNIUM_URL` from `Env`.
+- `wrangler.toml` — Replace `cortex-forge` and `cortex-cognium` queue bindings with a single `cortex-events` queue.
+
 ## Next Steps (Prioritized)
-1. Rate limiting / usage tracking per API key
-2. Observability — structured logging, Cloudflare Analytics Engine
-3. Webhook/callback support for long-running workflows
-4. Tenant policy loading from DB (currently returns defaults)
+1. **Decouple Cognium and Forge** — remove direct integrations per the cleanup list above. Replace with event emission.
+2. Rate limiting / usage tracking per API key
+3. Observability — structured logging, Cloudflare Analytics Engine
+4. Webhook/callback support for long-running workflows

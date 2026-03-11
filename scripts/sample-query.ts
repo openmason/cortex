@@ -150,7 +150,7 @@ async function main() {
     ENVIRONMENT: "local",
     RUNICS_URL: "https://runics.phantoms.workers.dev",
     COGNIUM_URL: "https://circle.cognium.net",
-    DAYTONA_URL: "https://api.daytona.io",
+    DAYTONA_TARGET: "us",
     LLMPROXY_URL: "https://llmproxy.xus.one",
     LLMPROXY_API_KEY: "mock-key",
     LLM_MODEL: "cognium/claude-sonnet-latest",

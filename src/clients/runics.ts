@@ -10,13 +10,18 @@ import type {
   ForkCompositeResponse,
 } from "../types";
 
+const SEARCH_CACHE_TTL = 300;  // 5 minutes for search results
+const SKILL_CACHE_TTL = 600;   // 10 minutes for individual skills
+
 export class RunicsClient {
   private baseUrl: string;
   private service?: Fetcher;
+  private kv: KVNamespace;
 
   constructor(private env: Env) {
     this.baseUrl = env.RUNICS_URL;
     this.service = env.RUNICS_SERVICE;
+    this.kv = env.SESSION_CACHE;
   }
 
   /**
@@ -32,6 +37,15 @@ export class RunicsClient {
   }
 
   async findSkill(request: FindSkillRequest): Promise<FindSkillResponse> {
+    // Check cache first
+    const cacheKey = `runics:search:${request.query}:${request.appetite ?? "balanced"}`;
+    try {
+      const cached = await this.kv.get(cacheKey);
+      if (cached) return JSON.parse(cached);
+    } catch {
+      // Cache miss — proceed with API call
+    }
+
     const res = await this.runicsFetch("/v1/search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -51,10 +65,28 @@ export class RunicsClient {
       throw new Error(`Runics search failed: ${res.status} ${await res.text()}`);
     }
 
-    return res.json();
+    const result: FindSkillResponse = await res.json();
+
+    // Cache result (best-effort)
+    try {
+      await this.kv.put(cacheKey, JSON.stringify(result), { expirationTtl: SEARCH_CACHE_TTL });
+    } catch {
+      // KV write failed — non-critical
+    }
+
+    return result;
   }
 
   async getSkill(slug: string, version?: string): Promise<SkillReference | null> {
+    // Check cache first
+    const cacheKey = `runics:skill:${slug}:${version ?? "latest"}`;
+    try {
+      const cached = await this.kv.get(cacheKey);
+      if (cached) return JSON.parse(cached);
+    } catch {
+      // Cache miss
+    }
+
     const path = version
       ? `/v1/skills/${slug}/${version}`
       : `/v1/skills/${slug}`;
@@ -65,7 +97,16 @@ export class RunicsClient {
       throw new Error(`Runics getSkill failed: ${res.status}`);
     }
 
-    return res.json();
+    const skill: SkillReference = await res.json();
+
+    // Cache result (best-effort)
+    try {
+      await this.kv.put(cacheKey, JSON.stringify(skill), { expirationTtl: SKILL_CACHE_TTL });
+    } catch {
+      // KV write failed — non-critical
+    }
+
+    return skill;
   }
 
   async recordInvocation(

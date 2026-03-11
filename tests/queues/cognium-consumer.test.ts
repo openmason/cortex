@@ -15,7 +15,7 @@ function makeMockEnv(): Env {
     ENVIRONMENT: "test",
     RUNICS_URL: "https://runics.test.local",
     COGNIUM_URL: "https://cognium.test.local",
-    DAYTONA_URL: "https://daytona.test.local",
+    DAYTONA_TARGET: "us",
     LLM_MODEL: "cognium/claude-sonnet-latest",
     DEFAULT_EXECUTION_MODE: "review_before_run",
     DEFAULT_APPETITE: "balanced",

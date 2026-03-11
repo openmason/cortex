@@ -2,15 +2,17 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import type { Env, AppVariables } from "./types";
-import { authMiddleware } from "./middleware/auth";
+import { authMiddleware, rateLimitMiddleware } from "./middleware/auth";
 import runRoutes from "./routes/run";
 import healthRoutes from "./routes/health";
 import adminRoutes from "./routes/admin";
 import sessionRoutes from "./routes/sessions";
 import skillRoutes from "./routes/skills";
+import demoRoutes from "./routes/demo";
 import { handleForgeMessage } from "./queues/forge-consumer";
 import { handleCogniumMessage } from "./queues/cognium-consumer";
 import { WorkflowEngine } from "./workflow/engine";
+import { DaytonaClient } from "./clients/daytona";
 
 // Re-export the Durable Object class (required by wrangler)
 export { WorkflowDurableObject } from "./workflow/durable-object";
@@ -34,6 +36,8 @@ app.onError((err, c) => {
 app.use("*", cors());
 app.use("*", logger());
 app.use("/v1/*", authMiddleware);
+app.use("/v1/run", rateLimitMiddleware);
+app.use("/v1/run/*", rateLimitMiddleware);
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -42,6 +46,7 @@ app.route("/v1", runRoutes);
 app.route("/v1/skills", skillRoutes);
 app.route("/v1/sessions", sessionRoutes);
 app.route("/admin", adminRoutes);
+app.route("/demo", demoRoutes);
 app.route("/", healthRoutes);
 
 // Root
@@ -121,7 +126,18 @@ async function handleScheduled(
       console.log(`[cron] Timed out ${expired} paused workflow(s)`);
     }
   } catch (err) {
-    console.error("[cron] Sweep failed:", err);
+    console.error("[cron] Workflow sweep failed:", err);
+  }
+
+  // Clean up orphaned Daytona sandboxes
+  try {
+    const daytona = new DaytonaClient(env);
+    const cleaned = await daytona.cleanup();
+    if (cleaned > 0) {
+      console.log(`[cron] Cleaned up ${cleaned} orphaned Daytona sandbox(es)`);
+    }
+  } catch (err) {
+    console.error("[cron] Daytona cleanup failed:", err);
   }
 }
 

@@ -31,8 +31,10 @@ export interface Env {
   ENVIRONMENT: string;
   RUNICS_URL: string;
   COGNIUM_URL: string;
-  DAYTONA_URL: string;
+  DAYTONA_TARGET: string;
+  DAYTONA_API_URL: string;
   LLM_MODEL: string;
+  TOOL_CALL_MODEL?: string;
   DEFAULT_EXECUTION_MODE: ExecutionMode;
   DEFAULT_APPETITE: Appetite;
   WORKFLOW_TIMEOUT_MS: string;
@@ -368,10 +370,13 @@ export interface CogniumFinding {
 // ---------------------------------------------------------------------------
 export interface SandboxRequest {
   skillId: string;
-  bundleKey: string;
   command: string;
+  bundleKey?: string;
+  language?: string;
+  snapshot?: string;
+  cwd?: string;
   env?: Record<string, string>;
-  timeoutMs?: number;
+  timeoutSecs?: number;
 }
 
 export interface SandboxResult {

@@ -1,4 +1,5 @@
 import type { ToolDefinition } from "../clients/llm";
+import type { LLMClient } from "../clients/llm";
 import type { Env, FindSkillResponse, SkillReference, TenantContext } from "../types";
 import { RunicsClient } from "../clients/runics";
 import { CogniumClient } from "../clients/cognium";
@@ -182,11 +183,12 @@ export class ToolExecutor {
   constructor(
     private env: Env,
     private tenant: TenantContext,
+    llm?: LLMClient,
   ) {
     this.runics = new RunicsClient(env);
     this.cognium = new CogniumClient(env);
     this.policyEngine = new PolicyEngine(env);
-    this.executionRouter = new ExecutionRouter(env);
+    this.executionRouter = new ExecutionRouter(env, llm);
   }
 
   /**

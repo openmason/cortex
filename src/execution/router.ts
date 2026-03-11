@@ -1,6 +1,7 @@
-import type { Env, ExecutionLayer, ExecutionResult, SkillReference, SandboxResult } from "../types";
+import type { Env, ExecutionLayer, ExecutionResult, SkillReference } from "../types";
 import { DaytonaClient } from "../clients/daytona";
 import { WorkerDispatch } from "./worker-dispatch";
+import type { LLMClient } from "../clients/llm";
 
 /**
  * Execution Router — maps skill.execution_layer to the right runtime.
@@ -9,14 +10,19 @@ import { WorkerDispatch } from "./worker-dispatch";
  * L1: Instructions  — LLM reads SKILL.md, uses built-in tools (0ms boot, $0 infra)
  * L2: Worker        — pure function on Cloudflare Workers (<5ms boot, ~$0.00001)
  * L3: Container     — Daytona sandbox, boot→run→destroy (~90ms boot, ~$0.001-0.10)
+ *
+ * Codegen fallback: when a skill has no bundle (mcpUrl, skillMd, r2BundleKey all null),
+ * the router asks the LLM to generate code and executes it in a Daytona sandbox.
  */
 export class ExecutionRouter {
   private daytona: DaytonaClient;
   private workerDispatch: WorkerDispatch;
+  private llm: LLMClient | null;
 
-  constructor(private env: Env) {
+  constructor(env: Env, llm?: LLMClient) {
     this.daytona = new DaytonaClient(env);
     this.workerDispatch = new WorkerDispatch(env);
+    this.llm = llm ?? null;
   }
 
   async execute(
@@ -34,15 +40,19 @@ export class ExecutionRouter {
         case "instructions":
           return await this.executeL1(skill, input, start);
 
-        case "worker":
-          return await this.executeL2(skill, input, start);
+        case "worker": {
+          const result = await this.workerDispatch.execute(skill, input);
+          // If worker failed because bundle not found, try codegen fallback
+          if (!result.success && result.error?.includes("Bundle not found") && this.llm) {
+            return await this.executeCodegen(skill, input, start);
+          }
+          return result;
+        }
 
         case "container":
           return await this.executeL3(skill, input, start);
 
         case "composite":
-          // Composites are expanded by the supervisor — they should not
-          // arrive here directly. If they do, error.
           return {
             success: false,
             output: null,
@@ -73,7 +83,6 @@ export class ExecutionRouter {
 
   /**
    * L0: Remote MCP — HTTP call to external MCP server.
-   * The skill has an mcpUrl. We POST the tool call to it.
    */
   private async executeL0(
     skill: SkillReference,
@@ -136,7 +145,6 @@ export class ExecutionRouter {
 
   /**
    * L1: Instructions — return the SKILL.md for the LLM to follow.
-   * The LLM executes this itself using Mastra built-in tools.
    */
   private async executeL1(
     skill: SkillReference,
@@ -144,6 +152,10 @@ export class ExecutionRouter {
     start: number,
   ): Promise<ExecutionResult> {
     if (!skill.skillMd) {
+      // No instructions — try codegen fallback
+      if (this.llm) {
+        return await this.executeCodegen(skill, input, start);
+      }
       return {
         success: false,
         output: null,
@@ -153,7 +165,6 @@ export class ExecutionRouter {
       };
     }
 
-    // L1 returns the instructions — the supervisor LLM reads and follows them
     return {
       success: true,
       output: {
@@ -168,53 +179,159 @@ export class ExecutionRouter {
   }
 
   /**
-   * L2: Worker — execute a pure JS/TS function on Cloudflare Workers.
-   * The skill's code bundle is loaded from R2 and executed via WorkerDispatch.
-   */
-  private async executeL2(
-    skill: SkillReference,
-    input: Record<string, unknown>,
-    _start: number,
-  ): Promise<ExecutionResult> {
-    return this.workerDispatch.execute(skill, input);
-  }
-
-  /**
-   * L3: Container — Daytona sandbox. Boot, run, destroy.
+   * L3: Container — Daytona sandbox. Create → upload bundle → execute → destroy.
    */
   private async executeL3(
     skill: SkillReference,
     input: Record<string, unknown>,
     start: number,
   ): Promise<ExecutionResult> {
-    if (!skill.r2BundleKey) {
+    // If no bundle, use codegen fallback
+    if (!skill.r2BundleKey && this.llm) {
+      return await this.executeCodegen(skill, input, start);
+    }
+
+    const result = await this.daytona.execute({
+      skillId: skill.id,
+      command: typeof input.command === "string"
+        ? input.command
+        : `node /workspace/${skill.r2BundleKey?.split("/").pop() ?? "bundle.js"}`,
+      bundleKey: skill.r2BundleKey,
+      env: input.env as Record<string, string> | undefined,
+      timeoutSecs: 60,
+    });
+
+    // If bundle not found in R2, try codegen
+    if (result.exitCode !== 0 && result.stderr?.includes("Bundle not found") && this.llm) {
+      return await this.executeCodegen(skill, input, start);
+    }
+
+    return {
+      success: result.exitCode === 0,
+      output: {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exitCode: result.exitCode,
+      },
+      durationMs: Date.now() - start,
+      layer: "container",
+      error: result.exitCode !== 0 ? result.stderr : undefined,
+    };
+  }
+
+  /**
+   * Codegen fallback — LLM generates code, Daytona executes it.
+   *
+   * Used when a skill has no executable bundle (no mcpUrl, no skillMd, no r2BundleKey).
+   * The LLM generates a self-contained script based on the skill description and input,
+   * then Daytona runs it in a sandbox.
+   */
+  private async executeCodegen(
+    skill: SkillReference,
+    input: Record<string, unknown>,
+    start: number,
+  ): Promise<ExecutionResult> {
+    if (!this.llm) {
       return {
         success: false,
         output: null,
         durationMs: Date.now() - start,
         layer: "container",
-        error: "Container skill missing r2BundleKey",
+        error: "Codegen fallback requires LLM client",
       };
     }
 
-    const sandboxResult: SandboxResult = await this.daytona.createSandbox({
-      skillId: skill.id,
-      bundleKey: skill.r2BundleKey,
-      command: JSON.stringify(input),
-      timeoutMs: 60_000,
-    });
+    // 1. Ask the LLM to generate code
+    const description = (skill as any).agentSummary ?? (skill as any).description ?? skill.name;
+    const prompt = `You are a code generator. Your ONLY output must be raw JavaScript code — no markdown, no fences, no explanation, no comments before or after the code.
+
+Task: write a self-contained Node.js script.
+
+SKILL: ${skill.slug}
+DESCRIPTION: ${description}
+INPUT: ${JSON.stringify(input)}
+
+Rules:
+1. Output raw JavaScript only. Do NOT wrap in \`\`\` fences.
+2. Self-contained — no require() for external packages, only Node.js built-ins (http, https, fs, path, os, crypto, child_process, url, util, stream, zlib).
+3. Define the input inline: const input = ${JSON.stringify(input)};
+4. Print the result to stdout as JSON: console.log(JSON.stringify(result));
+5. On failure, write to stderr and exit: process.stderr.write(error); process.exit(1);
+6. The script must complete in under 25 seconds.`;
+
+    let code: string;
+    try {
+      const response = await this.llm.chat({
+        messages: [
+          { role: "system", content: "You are a code generator. Output ONLY valid JavaScript code. Never use markdown formatting. Never include ``` fences." },
+          { role: "user", content: prompt },
+        ],
+        temperature: 0,
+        max_tokens: 4096,
+      });
+      code = response.choices[0]?.message?.content ?? "";
+      if (!code.trim()) {
+        throw new Error("LLM returned empty code");
+      }
+    } catch (err) {
+      return {
+        success: false,
+        output: null,
+        durationMs: Date.now() - start,
+        layer: "container",
+        error: `Codegen failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+
+    code = this.stripFences(code);
+
+    // 2. Execute in Daytona sandbox using codeRun (no file writing needed)
+    let result = await this.daytona.runCode(code, 30);
+
+    // 3. If execution failed, retry once with the error fed back to the LLM
+    if (result.exitCode !== 0 && this.llm) {
+      const errorOutput = (result.stderr || result.stdout || "").slice(0, 1000);
+      try {
+        const retryResponse = await this.llm.chat({
+          messages: [
+            { role: "system", content: "You are a code generator. Output ONLY valid JavaScript code. Never use markdown formatting. Never include ``` fences." },
+            { role: "user", content: prompt },
+            { role: "assistant", content: code },
+            { role: "user", content: `The script failed with this error:\n\n${errorOutput}\n\nFix the code. Output ONLY the corrected JavaScript, no explanation.` },
+          ],
+          temperature: 0,
+          max_tokens: 4096,
+        });
+        const fixedCode = this.stripFences(retryResponse.choices[0]?.message?.content ?? "");
+        if (fixedCode.trim()) {
+          result = await this.daytona.runCode(fixedCode, 30);
+        }
+      } catch {
+        // Retry is best-effort — fall through with original result
+      }
+    }
 
     return {
-      success: sandboxResult.exitCode === 0,
+      success: result.exitCode === 0,
       output: {
-        stdout: sandboxResult.stdout,
-        stderr: sandboxResult.stderr,
-        exitCode: sandboxResult.exitCode,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exitCode: result.exitCode,
+        codegenerated: true,
       },
       durationMs: Date.now() - start,
       layer: "container",
-      error: sandboxResult.exitCode !== 0 ? sandboxResult.stderr : undefined,
+      error: result.exitCode !== 0 ? (result.stderr || result.stdout || "Execution failed") : undefined,
     };
+  }
+
+  /** Strip markdown fences from LLM-generated code */
+  private stripFences(code: string): string {
+    return code
+      .replace(/^```[\w]*\n?/gm, "")
+      .replace(/\n?```$/gm, "")
+      .replace(/^```$/gm, "")
+      .trim();
   }
 }
 

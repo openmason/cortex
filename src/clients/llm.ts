@@ -165,14 +165,30 @@ export class LLMClient {
     const allMessages = [...messages];
 
     for (let turn = 0; turn < maxTurns; turn++) {
-      const response = await this.chat({
-        model: options.model,
-        messages: allMessages,
-        tools,
-        tool_choice: "auto",
-        temperature: options.temperature ?? 0.2,
-        max_tokens: options.maxTokens ?? 4096,
-      });
+      let response: ChatCompletionResponse;
+      try {
+        response = await this.chat({
+          model: options.model,
+          messages: allMessages,
+          tools,
+          tool_choice: "auto",
+          temperature: options.temperature ?? 0.2,
+          max_tokens: options.maxTokens ?? 4096,
+        });
+      } catch (err) {
+        // If a non-default model was requested and it failed, retry with default
+        if (options.model && options.model !== this.model) {
+          response = await this.chat({
+            messages: allMessages,
+            tools,
+            tool_choice: "auto",
+            temperature: options.temperature ?? 0.2,
+            max_tokens: options.maxTokens ?? 4096,
+          });
+        } else {
+          throw err;
+        }
+      }
 
       const choice = response.choices[0];
       if (!choice) {
