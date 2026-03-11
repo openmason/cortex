@@ -16,6 +16,7 @@ import { RunicsClient } from "../clients/runics";
 import { ForgeClient } from "../clients/forge";
 import { WorkflowRepository } from "../db/repository";
 import { resolveInputMapping } from "./input-mapping";
+import type { LLMClient } from "../clients/llm";
 
 /**
  * Workflow Engine — orchestrates the full request lifecycle.
@@ -34,8 +35,8 @@ export class WorkflowEngine {
   private forge: ForgeClient;
   private repo: WorkflowRepository | null;
 
-  constructor(private env: Env) {
-    this.executor = new ExecutionRouter(env);
+  constructor(private env: Env, llm?: LLMClient) {
+    this.executor = new ExecutionRouter(env, llm);
     this.cognium = new CogniumClient(env);
     this.runics = new RunicsClient(env);
     this.forge = new ForgeClient(env);

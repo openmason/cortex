@@ -1,6 +1,23 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// Mock @daytonaio/sdk before importing engine
+const mockDelete = vi.fn().mockResolvedValue(undefined);
+const mockCodeRun = vi.fn();
+const mockExecuteCommand = vi.fn();
+const mockCreate = vi.fn().mockResolvedValue({
+  process: { executeCommand: mockExecuteCommand, codeRun: mockCodeRun },
+  fs: { uploadFile: vi.fn().mockResolvedValue(undefined) },
+  delete: mockDelete,
+});
+vi.mock("@daytonaio/sdk", () => ({
+  Daytona: vi.fn().mockImplementation(() => ({
+    create: mockCreate,
+  })),
+}));
+
 import { WorkflowEngine } from "../../src/workflow/engine";
 import type { Env, WorkflowPlan, TenantContext, SkillReference } from "../../src/types";
+import type { LLMClient, ChatCompletionResponse } from "../../src/clients/llm";
 
 function makeSkill(overrides: Partial<SkillReference> = {}): SkillReference {
   return {
@@ -410,6 +427,148 @@ describe("WorkflowEngine", () => {
     it("should return null for non-existent workflow", async () => {
       const loaded = await engine.loadState("nonexistent-id");
       expect(loaded).toBeNull();
+    });
+  });
+
+  describe("codegen fallback via LLM", () => {
+    function makeMockLLM(): LLMClient {
+      return {
+        chat: vi.fn().mockResolvedValue({
+          id: "resp-1",
+          object: "chat.completion",
+          created: Date.now(),
+          model: "test-model",
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: "assistant",
+                content: 'const input = {};\nconsole.log(JSON.stringify({ result: "generated" }));',
+              },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
+        } as ChatCompletionResponse),
+      } as unknown as LLMClient;
+    }
+
+    it("should use codegen fallback for skills with no bundle when LLM is provided", async () => {
+      const mockLLM = makeMockLLM();
+      const engineWithLLM = new WorkflowEngine(env, mockLLM);
+
+      // codeRun returns successful result
+      mockCodeRun.mockResolvedValue({
+        exitCode: 0,
+        result: '{"result":"generated"}',
+      });
+
+      const plan = makePlan({
+        mode: "full_auto",
+        steps: [
+          {
+            id: "step-1",
+            order: 0,
+            skill: makeSkill({
+              executionLayer: "container",
+              mcpUrl: undefined,
+              skillMd: undefined,
+              r2BundleKey: undefined,
+            }),
+            onError: "fail",
+            status: "pending",
+          },
+        ],
+      });
+
+      const state = await engineWithLLM.start(plan, makeTenant(), ctx);
+
+      expect(state.status).toBe("completed");
+      expect(state.plan.steps[0].status).toBe("completed");
+      expect(state.plan.steps[0].result?.output).toHaveProperty("codegenerated", true);
+      expect(mockLLM.chat).toHaveBeenCalled();
+      expect(mockCodeRun).toHaveBeenCalled();
+    });
+
+    it("should fail codegen step when no LLM is provided", async () => {
+      // Engine without LLM — codegen fallback won't work
+      const engineNoLLM = new WorkflowEngine(env);
+
+      const plan = makePlan({
+        mode: "full_auto",
+        steps: [
+          {
+            id: "step-1",
+            order: 0,
+            skill: makeSkill({
+              executionLayer: "container",
+              mcpUrl: undefined,
+              skillMd: undefined,
+              r2BundleKey: undefined,
+            }),
+            onError: "fail",
+            status: "pending",
+          },
+        ],
+      });
+
+      // Mock Daytona execute to simulate "bundle not found"
+      mockExecuteCommand.mockResolvedValue({
+        exitCode: 1,
+        result: {
+          code: 1,
+          output: "Bundle not found",
+        },
+      });
+
+      const state = await engineNoLLM.start(plan, makeTenant(), ctx);
+
+      expect(state.status).toBe("failed");
+      expect(state.plan.steps[0].status).toBe("failed");
+    });
+
+    it("should execute multi-step workflow with codegen for mixed skills", async () => {
+      const mockLLM = makeMockLLM();
+      const engineWithLLM = new WorkflowEngine(env, mockLLM);
+
+      mockCodeRun.mockResolvedValue({
+        exitCode: 0,
+        result: '{"result":"codegen-output"}',
+      });
+
+      // Step 1: MCP skill (uses fetch), Step 2: container skill with no bundle (uses codegen)
+      const plan = makePlan({
+        mode: "full_auto",
+        steps: [
+          {
+            id: "step-1",
+            order: 0,
+            skill: makeSkill({ id: "s1", executionLayer: "mcp-remote", mcpUrl: "https://mcp.example.com/tools" }),
+            onError: "fail",
+            status: "pending",
+          },
+          {
+            id: "step-2",
+            order: 1,
+            skill: makeSkill({
+              id: "s2",
+              executionLayer: "container",
+              mcpUrl: undefined,
+              skillMd: undefined,
+              r2BundleKey: undefined,
+            }),
+            onError: "fail",
+            status: "pending",
+          },
+        ],
+      });
+
+      const state = await engineWithLLM.start(plan, makeTenant(), ctx);
+
+      expect(state.status).toBe("completed");
+      expect(state.plan.steps[0].status).toBe("completed"); // MCP step
+      expect(state.plan.steps[1].status).toBe("completed"); // Codegen step
+      expect(state.plan.steps[1].result?.output).toHaveProperty("codegenerated", true);
     });
   });
 });

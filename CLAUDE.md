@@ -5,8 +5,9 @@ Cloudflare Workers-based agent runtime that orchestrates skill discovery, planni
 
 ## Architecture
 - **Supervisor Agent** (`src/agents/supervisor.ts`) — LLM-powered agentic loop with tool calling (findSkill, checkPolicy, buildPlan, invokeSkill)
-- **Workflow Engine** (`src/workflow/engine.ts`) — orchestrates multi-step skill execution with pause/resume, input mapping ($prev, $step.N)
-- **Execution Router** (`src/execution/router.ts`) — dispatches to 5 layers: mcp-remote, instructions, worker, container, composite
+- **Workflow Engine** (`src/workflow/engine.ts`) — orchestrates multi-step skill execution with pause/resume, input mapping ($prev, $step.N). Accepts optional `LLMClient` for codegen fallback in workflow steps.
+- **Execution Router** (`src/execution/router.ts`) — dispatches to 5 layers: mcp-remote, instructions, worker, container, composite. Includes codegen fallback for skills with no executable bundle.
+- **Daytona Client** (`src/clients/daytona.ts`) — Uses `@daytonaio/sdk` for sandbox execution. Key methods: `execute()` (shell commands), `runCode()` (direct code execution via `codeRun()`), `cleanup()` (orphaned sandbox removal).
 - **Policy Engine** (`src/policy/engine.ts`) — tenant-level trust checks, appetite thresholds, sensitive categories
 - **DB Repository** (`src/db/repository.ts`) — Drizzle/postgres.js/Hyperdrive for durable workflow records and API key storage
 
@@ -32,7 +33,9 @@ Runics (registry) ──→ Cognium (internal trust/scanning)
 ## LLM Proxy
 - URL: `https://llmproxy.xus.one` (OpenAI-compatible, routed via LiteLLM → OpenRouter / Cloudflare Workers AI)
 - API Key: set as `LLMPROXY_API_KEY` secret
-- Default model: `cognium/claude-sonnet-latest`
+- Default model (`LLM_MODEL`): `cognium/claude-sonnet-latest`
+- Tool call model (`TOOL_CALL_MODEL`): configurable separately. Currently `cognium/claude-sonnet-latest`. `gpt-oss-120b` was tested but returns Workers AI 500 errors.
+- **Model fallback**: `agentLoop` in `src/clients/llm.ts` retries with the default model if the preferred model (e.g. `TOOL_CALL_MODEL`) fails.
 - **OpenRouter compat**: Handled at the proxy layer (v0.5.2) — response normalization + input message normalization. All models work for multi-turn tool calling.
 - Models constant in `src/clients/llm.ts` MODELS object
 
@@ -82,6 +85,9 @@ Runics (registry) ──→ Cognium (internal trust/scanning)
 - `GET /v1/sessions` — List sessions (tenant-scoped, paginated)
 - `GET /v1/sessions/:id` — Session detail with step executions
 - `GET /v1/sessions/:id/trace` — Execution trace (consumed by Forge independently)
+- `GET /v1/sessions/conversations` — List conversations from KV (sorted by recent activity)
+- `GET /v1/sessions/conversations/:id` — Get full conversation with messages
+- `DELETE /v1/sessions/conversations/:id` — Delete a conversation
 - `GET /v1/skills/composites` — List composite skills (tenant-scoped, paginated)
 - `GET /v1/skills/composites/:slug` — Composite detail with composition steps
 - `PATCH /v1/skills/composites/:slug` — Update composite metadata
@@ -92,9 +98,37 @@ Runics (registry) ──→ Cognium (internal trust/scanning)
 - `PUT /admin/policies` — Upsert tenant policy
 - `GET /admin/policies/:tenantId/:product` — Get tenant policy
 
+## Codegen Fallback
+When a skill has no executable bundle (no `mcpUrl`, no `skillMd`, no `r2BundleKey`), the ExecutionRouter uses LLM-generated code executed in a Daytona sandbox:
+1. LLM generates a self-contained Node.js script based on skill description + input (temperature 0, strict "raw JS only" system message)
+2. Code is executed via `DaytonaClient.runCode()` which uses `sandbox.process.codeRun()` from `@daytonaio/sdk`
+3. On failure, the error is fed back to the LLM for a single retry attempt
+4. `stripFences()` aggressively removes markdown code fences from LLM output
+- The codegen path is available in both `invokeSkill` (direct execution) and `buildPlan` (multi-step workflow) flows
+- Requires `LLMClient` to be passed through: Supervisor → ToolExecutor → ExecutionRouter, and Supervisor → WorkflowEngine → ExecutionRouter
+
+## Daytona Integration
+- SDK: `@daytonaio/sdk` (direct API, not REST)
+- `DaytonaClient.execute()` — shell command execution in sandbox
+- `DaytonaClient.runCode()` — direct code execution via `codeRun()` (used by codegen fallback)
+- `DaytonaClient.cleanup()` — lists and deletes all sandboxes (called by cron)
+- Target region: `DAYTONA_TARGET` env var (default: `us`)
+- Sandbox lifecycle: create → execute → delete (always cleaned up in `finally` block)
+
+## Rate Limiting
+- KV-based sliding window: 30 requests/minute per tenant
+- Applied to `/v1/run` and `/v1/run/*` routes
+- All KV writes are non-blocking (`waitUntil` + `try/catch`) to avoid blocking on KV daily write limits
+- Response headers: `X-RateLimit-Limit`, `X-RateLimit-Remaining`
+
+## Runics Skill Caching
+- `findSkill` results cached in KV for 5 minutes (key: `runics:search:{query}:{appetite}`)
+- `getSkill` results cached in KV for 10 minutes (key: `runics:skill:{slug}:{version}`)
+- All cache writes are best-effort (wrapped in try/catch)
+
 ## SSE Streaming
 - `POST /v1/run/stream` returns Server-Sent Events
-- Event types: `planning`, `tool_call`, `tool_result`, `step_start`, `step_complete`, `workflow_complete`, `error`, `done`
+- Event types: `planning`, `tool_call`, `tool_result`, `step_start`, `step_complete`, `workflow_complete`, `error`, `done`, `conversation`
 - Non-streaming `/v1/run` unchanged
 
 ## Tenant Policies
@@ -110,28 +144,35 @@ Runics (registry) ──→ Cognium (internal trust/scanning)
 - Paused workflows (`paused_for_review`, `paused_at_step`) get `timeoutAt` set to `now + WORKFLOW_TIMEOUT_MS` (default 5 min)
 - **Lazy check**: `GET /v1/run/:id` checks `timeoutAt` and transitions to `timed_out` if expired
 - **Resume guard**: `engine.resume()` checks timeout before allowing execution
-- **Cron sweep**: `*/5 * * * *` cron lists `workflow:*` KV keys, expires any paused workflows past `timeoutAt`
+- **Cron sweep**: `*/5 * * * *` cron does two things:
+  1. Lists `workflow:*` KV keys, expires any paused workflows past `timeoutAt`
+  2. Calls `DaytonaClient.cleanup()` to delete orphaned sandboxes
 - Backward compat: old states without `timeoutAt` are never lazily timed out
 
 ## Testing
-- 380 unit tests passing across 24 test files (`npx vitest run`)
+- 394 unit tests passing across 25 test files (`npx vitest run`)
 - Local dev tested with `npx wrangler dev` — health, models, and full run request all work
+- E2E verified live: codegen pipeline working end-to-end (findSkill → invokeSkill → codegen → Daytona → result)
 - E2E smoke test: `ADMIN_SECRET=<secret> npx tsx scripts/smoke-test.ts` (9 tests against live deployment)
 - Sample query script: `scripts/sample-query.ts` (mocked, in-process)
 
 ## Key Files
-- `src/index.ts` — Hono app, queue handler, cron handler
+- `src/index.ts` — Hono app, queue handler, cron handler (includes Daytona cleanup)
 - `src/types.ts` — all shared types, Env, AppVariables, SSEEvent
-- `src/middleware/auth.ts` — Bearer API key auth middleware
+- `src/middleware/auth.ts` — Bearer API key auth + rate limiting middleware
 - `src/agents/supervisor.ts` — main request handler with LLM agentic loop + streaming variant
-- `src/agents/tools.ts` — tool definitions and ToolExecutor
-- `src/clients/llm.ts` — LLM proxy client (chat, agentLoop with onEvent, listModels)
-- `src/workflow/engine.ts` — workflow orchestration with DB persistence and SSE events
+- `src/agents/tools.ts` — tool definitions and ToolExecutor (passes LLM to ExecutionRouter)
+- `src/clients/llm.ts` — LLM proxy client (chat, agentLoop with model fallback, listModels)
+- `src/clients/daytona.ts` — Daytona SDK client (execute, runCode, cleanup)
+- `src/clients/runics.ts` — Runics client with KV caching (findSkill, getSkill, composites)
+- `src/execution/router.ts` — Execution router with codegen fallback and retry
+- `src/workflow/engine.ts` — workflow orchestration with DB persistence, SSE events, and LLM passthrough
 - `src/workflow/input-mapping.ts` — $prev/$step.N resolver
+- `src/conversation/manager.ts` — multi-turn conversation state management (KV-backed)
 - `src/db/schema.ts` — Drizzle schema (workflow_sessions, step_executions, execution_traces, tenant_policies, api_keys)
 - `src/db/repository.ts` — DB operations (sessions, policies, traces, API keys)
 - `src/routes/run.ts` — /v1/run, /v1/run/stream, /v1/run/:id, resume, save, models
-- `src/routes/sessions.ts` — /v1/sessions, /v1/sessions/:id, /v1/sessions/:id/trace
+- `src/routes/sessions.ts` — /v1/sessions, /v1/sessions/:id, /v1/sessions/:id/trace, conversations CRUD
 - `src/routes/skills.ts` — /v1/skills/composites CRUD (list, detail, update, deprecate, fork)
 - `src/routes/admin.ts` — /admin/api-keys, /admin/policies
 - `src/routes/health.ts` — /health
@@ -149,7 +190,8 @@ Master specification: `cortex-specification.md`
 - `nodejs_compat` compatibility flag enabled in `wrangler.toml`
 
 ## Known Issues
-- **KV free-tier daily write limit** — `WORKFLOW_STATE` KV still hits the daily write cap for workflow state writes and health checks. API keys are now in Neon DB (resolved). Health check uses read-only KV check to avoid burning writes.
+- **KV free-tier daily write limit** — `WORKFLOW_STATE` KV still hits the daily write cap for workflow state writes and health checks. API keys are now in Neon DB (resolved). Health check uses read-only KV check to avoid burning writes. Rate limiter and auth backfill KV writes are non-blocking (`waitUntil` + `try/catch`).
+- **gpt-oss-120b unreliable** — Workers AI model returns internal server errors (500). `TOOL_CALL_MODEL` is set to `claude-sonnet-latest` as a workaround. Model fallback in `agentLoop` handles failures gracefully.
 
 ## Code Cleanup Needed
 The following files still contain direct Cognium/Forge integration that should be decoupled:
@@ -166,6 +208,7 @@ The following files still contain direct Cognium/Forge integration that should b
 
 ## Next Steps (Prioritized)
 1. **Decouple Cognium and Forge** — remove direct integrations per the cleanup list above. Replace with event emission.
-2. Rate limiting / usage tracking per API key
-3. Observability — structured logging, Cloudflare Analytics Engine
-4. Webhook/callback support for long-running workflows
+2. Observability — structured logging, Cloudflare Analytics Engine
+3. Webhook/callback support for long-running workflows
+4. Per-API-key usage tracking and billing metering
+5. E2E test for buildPlan multi-step workflow path (live, not just unit tests)
