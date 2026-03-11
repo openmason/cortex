@@ -65,11 +65,15 @@ export class ConversationManager {
 
   async save(state: ConversationState): Promise<void> {
     state.lastActivityAt = new Date().toISOString();
-    await this.kv.put(
-      this.key(state.tenantId, state.conversationId),
-      JSON.stringify(state),
-      { expirationTtl: this.config.ttlSeconds },
-    );
+    try {
+      await this.kv.put(
+        this.key(state.tenantId, state.conversationId),
+        JSON.stringify(state),
+        { expirationTtl: this.config.ttlSeconds },
+      );
+    } catch (err) {
+      console.warn(`[conversation] KV save failed for ${state.conversationId}:`, err);
+    }
   }
 
   createState(

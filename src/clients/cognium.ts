@@ -1,21 +1,17 @@
 import type {
-  Env,
   SkillReference,
   TrustCheckResult,
-  CogniumSeverity,
   Appetite,
 } from "../types";
 
 /**
- * Cognium Client — trust scoring and security checks.
+ * Trust checker — pre-flight trust validation for skills.
  *
- * Cortex calls Cognium to:
- * 1. Pre-flight check: Is this skill safe to execute at the tenant's appetite?
- * 2. Runtime warning: Should the agent surface a warning about this skill?
- * 3. Block decision: Is this skill revoked/blocked?
+ * Checks whether a skill is safe to execute at the tenant's appetite level.
+ * Trust scores come from Runics (which gets them from Cognium internally).
+ * Cortex never talks to Cognium directly.
  */
 export class CogniumClient {
-  constructor(private env: Env) {}
 
   /**
    * Pre-flight trust check before executing a skill.
@@ -85,16 +81,6 @@ export class CogniumClient {
     };
   }
 
-  /**
-   * Submit a skill for async Cognium scanning (via queue).
-   */
-  async submitForScan(skillId: string, priority: "high" | "normal" = "normal"): Promise<void> {
-    await this.env.COGNIUM_QUEUE.send({
-      skillId,
-      priority,
-      timestamp: Date.now(),
-    });
-  }
 }
 
 // ---------------------------------------------------------------------------

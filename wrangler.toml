@@ -35,25 +35,6 @@ localConnectionString = "${DATABASE_URL}"
 binding = "R2_BUCKET"
 bucket_name = "cortex-artifacts"
 
-# --- Queues ---
-[[queues.producers]]
-binding = "FORGE_QUEUE"
-queue = "cortex-forge"
-
-[[queues.producers]]
-binding = "COGNIUM_QUEUE"
-queue = "cortex-cognium"
-
-[[queues.consumers]]
-queue = "cortex-forge"
-max_batch_size = 5
-max_batch_timeout = 30
-
-[[queues.consumers]]
-queue = "cortex-cognium"
-max_batch_size = 5
-max_batch_timeout = 30
-
 # --- Service Bindings (worker-to-worker) ---
 [[services]]
 binding = "RUNICS_SERVICE"
@@ -67,7 +48,6 @@ binding = "AI"
 [vars]
 ENVIRONMENT = "production"
 RUNICS_URL = "https://runics.phantoms.workers.dev"
-COGNIUM_URL = "https://circle.cognium.net"
 DAYTONA_TARGET = "us"
 DAYTONA_API_URL = "https://app.daytona.io/api"
 LLMPROXY_URL = "https://llmproxy.xus.one"

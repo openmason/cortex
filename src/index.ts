@@ -9,8 +9,6 @@ import adminRoutes from "./routes/admin";
 import sessionRoutes from "./routes/sessions";
 import skillRoutes from "./routes/skills";
 import demoRoutes from "./routes/demo";
-import { handleForgeMessage } from "./queues/forge-consumer";
-import { handleCogniumMessage } from "./queues/cognium-consumer";
 import { WorkflowEngine } from "./workflow/engine";
 import { DaytonaClient } from "./clients/daytona";
 
@@ -58,38 +56,6 @@ app.get("/", (c) =>
     docs: "/health",
   }),
 );
-
-// ---------------------------------------------------------------------------
-// Queue Consumers
-// ---------------------------------------------------------------------------
-async function handleQueue(
-  batch: MessageBatch,
-  env: Env,
-  ctx: ExecutionContext,
-): Promise<void> {
-  for (const msg of batch.messages) {
-    try {
-      switch (batch.queue) {
-        case "cortex-forge":
-          await handleForgeMessage(msg.body as any, env);
-          msg.ack();
-          break;
-
-        case "cortex-cognium":
-          await handleCogniumMessage(msg.body as any, env);
-          msg.ack();
-          break;
-
-        default:
-          console.warn(`[queue] Unknown queue: ${batch.queue}`);
-          msg.ack();
-      }
-    } catch (err) {
-      console.error(`[queue] Error processing message on ${batch.queue}:`, err);
-      msg.retry();
-    }
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Scheduled (Cron) Handler
@@ -141,11 +107,7 @@ async function handleScheduled(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Export
-// ---------------------------------------------------------------------------
 export default {
   fetch: app.fetch,
-  queue: handleQueue,
   scheduled: handleScheduled,
 };

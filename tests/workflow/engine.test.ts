@@ -76,13 +76,10 @@ function makeMockEnv(): Env {
     R2_BUCKET: {
       get: vi.fn().mockResolvedValue({ arrayBuffer: () => new ArrayBuffer(0) }),
     } as unknown as R2Bucket,
-    FORGE_QUEUE: { send: vi.fn() } as unknown as Queue,
-    COGNIUM_QUEUE: { send: vi.fn() } as unknown as Queue,
     AI: {} as Ai,
     WORKFLOW_DO: {} as DurableObjectNamespace,
     ENVIRONMENT: "test",
     RUNICS_URL: "https://runics.phantoms.workers.dev",
-    COGNIUM_URL: "https://circle.cognium.net",
     DAYTONA_TARGET: "us",
     LLM_MODEL: "claude-sonnet-4-20250514",
     DEFAULT_EXECUTION_MODE: "review_before_run",
@@ -186,15 +183,6 @@ describe("WorkflowEngine", () => {
       expect(state.error).toContain("below appetite threshold");
     });
 
-    it("should trigger Forge auto-distill after successful completion", async () => {
-      const plan = makePlan({ mode: "full_auto" });
-      const tenant = makeTenant();
-
-      await engine.start(plan, tenant, ctx);
-
-      expect(ctx.waitUntil).toHaveBeenCalled();
-      expect(env.FORGE_QUEUE.send).toHaveBeenCalled();
-    });
   });
 
   describe("resume", () => {

@@ -2,32 +2,16 @@ import type { Env, WorkflowState, WorkflowStep, Visibility, SaveAsSkillResponse 
 import { LLMClient, MODELS } from "./llm";
 
 /**
- * Forge Client — skill generation and distillation triggers.
+ * Forge Client — skill distillation (human-distill only).
  *
- * Mode 1: Generate-before — LLM generates a new skill when no match found
- * Mode 2: Auto-distill   — post-workflow hook evaluates traces for reusable patterns
- * Mode 3: Human-distill  — user saves a modified workflow as a named skill
+ * Human-distill: user explicitly saves a completed workflow as a named skill.
+ * Auto-distill and generate are handled by Forge independently (subscribes to events).
  */
 export class ForgeClient {
   constructor(private env: Env) {}
 
   /**
-   * Mode 2: Auto-distill — enqueue a completed workflow trace for
-   * automatic pattern detection and skill distillation.
-   */
-  async autoDistill(workflowState: WorkflowState): Promise<void> {
-    await this.env.FORGE_QUEUE.send({
-      type: "auto-distill",
-      traceId: workflowState.workflowId,
-      tenantId: workflowState.tenantId,
-      prompt: workflowState.plan.steps.map((s) => s.skill.slug).join(" → "),
-      plan: workflowState.plan,
-      timestamp: Date.now(),
-    });
-  }
-
-  /**
-   * Mode 3: Human-distill — user explicitly saves a workflow as a skill.
+   * Human-distill — user explicitly saves a workflow as a skill.
    * Publishes directly to Runics with composite trust, alt-queries, and step definitions.
    */
   async humanDistill(request: {
@@ -122,19 +106,6 @@ export class ForgeClient {
       trustBadge: "human-verified",
       createdAt: new Date().toISOString(),
     };
-  }
-
-  /**
-   * Mode 1: Generate-before — when no skill match is found, ask the LLM
-   * to generate a new skill definition on the fly.
-   */
-  async generateSkill(intent: string, capabilities: string[]): Promise<void> {
-    await this.env.FORGE_QUEUE.send({
-      type: "generate",
-      intent,
-      capabilities,
-      timestamp: Date.now(),
-    });
   }
 
   /**

@@ -14,10 +14,6 @@ export interface Env {
   // R2
   R2_BUCKET: R2Bucket;
 
-  // Queues
-  FORGE_QUEUE: Queue;
-  COGNIUM_QUEUE: Queue;
-
   // Workers AI
   AI: Ai;
 
@@ -30,7 +26,6 @@ export interface Env {
   // Vars
   ENVIRONMENT: string;
   RUNICS_URL: string;
-  COGNIUM_URL: string;
   DAYTONA_TARGET: string;
   DAYTONA_API_URL: string;
   LLM_MODEL: string;

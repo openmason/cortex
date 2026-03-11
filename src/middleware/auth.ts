@@ -114,7 +114,7 @@ export const rateLimitMiddleware = createMiddleware<{
 
     // Increment (best-effort — KV is eventually consistent but fine for rate limiting)
     c.executionCtx.waitUntil(
-      c.env.SESSION_CACHE.put(windowKey, String(current + 1), { expirationTtl: RATE_LIMIT_WINDOW * 2 }),
+      c.env.SESSION_CACHE.put(windowKey, String(current + 1), { expirationTtl: RATE_LIMIT_WINDOW * 2 }).catch(() => {}),
     );
 
     c.header("X-RateLimit-Limit", String(RATE_LIMIT_MAX));

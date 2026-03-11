@@ -13,13 +13,10 @@ function makeMockEnv(): Env {
     R2_BUCKET: {
       get: vi.fn().mockResolvedValue(null),
     } as unknown as R2Bucket,
-    FORGE_QUEUE: { send: vi.fn() } as unknown as Queue,
-    COGNIUM_QUEUE: { send: vi.fn() } as unknown as Queue,
     AI: {} as Ai,
     WORKFLOW_DO: {} as DurableObjectNamespace,
     ENVIRONMENT: "test",
     RUNICS_URL: "https://runics.test.local",
-    COGNIUM_URL: "https://cognium.test.local",
     DAYTONA_TARGET: "us",
     LLM_MODEL: "claude-sonnet-4-20250514",
     DEFAULT_EXECUTION_MODE: "review_before_run",

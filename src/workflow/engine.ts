@@ -13,7 +13,6 @@ import type {
 import { ExecutionRouter } from "../execution/router";
 import { CogniumClient } from "../clients/cognium";
 import { RunicsClient } from "../clients/runics";
-import { ForgeClient } from "../clients/forge";
 import { WorkflowRepository } from "../db/repository";
 import { resolveInputMapping } from "./input-mapping";
 import type { LLMClient } from "../clients/llm";
@@ -26,20 +25,17 @@ import type { LLMClient } from "../clients/llm";
  * 3. Resolves input mappings between steps ($prev, $step.N)
  * 4. Runs each step through the execution router
  * 5. Records results to KV (live state) and DB (durable record)
- * 6. Triggers post-workflow hooks (Forge auto-distillation)
  */
 export class WorkflowEngine {
   private executor: ExecutionRouter;
   private cognium: CogniumClient;
   private runics: RunicsClient;
-  private forge: ForgeClient;
   private repo: WorkflowRepository | null;
 
   constructor(private env: Env, llm?: LLMClient) {
     this.executor = new ExecutionRouter(env, llm);
-    this.cognium = new CogniumClient(env);
+    this.cognium = new CogniumClient();
     this.runics = new RunicsClient(env);
-    this.forge = new ForgeClient(env);
 
     // DB repository is optional — only available when Hyperdrive is configured
     try {
@@ -294,9 +290,6 @@ export class WorkflowEngine {
         data: { workflowId: state.workflowId, status: state.status },
       });
 
-      // Post-workflow: trigger Forge auto-distillation (non-blocking)
-      executionCtx.waitUntil(this.forge.autoDistill(state));
-
       // Write execution trace to DB (non-blocking)
       if (this.repo) {
         const userModified = !!state.resumeData;
@@ -344,13 +337,18 @@ export class WorkflowEngine {
 
   /**
    * Persist workflow state to KV for durability.
+   * Best-effort — KV free tier has daily write limits.
    */
   private async persistState(state: WorkflowState): Promise<void> {
-    await this.env.WORKFLOW_STATE.put(
-      `workflow:${state.workflowId}`,
-      JSON.stringify(state),
-      { expirationTtl: 86400 * 7 }, // 7 days
-    );
+    try {
+      await this.env.WORKFLOW_STATE.put(
+        `workflow:${state.workflowId}`,
+        JSON.stringify(state),
+        { expirationTtl: 86400 * 7 }, // 7 days
+      );
+    } catch (err) {
+      console.warn(`[engine] KV persist failed for ${state.workflowId}:`, err);
+    }
   }
 
   /**

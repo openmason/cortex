@@ -186,7 +186,7 @@ export class ToolExecutor {
     llm?: LLMClient,
   ) {
     this.runics = new RunicsClient(env);
-    this.cognium = new CogniumClient(env);
+    this.cognium = new CogniumClient();
     this.policyEngine = new PolicyEngine(env);
     this.executionRouter = new ExecutionRouter(env, llm);
   }

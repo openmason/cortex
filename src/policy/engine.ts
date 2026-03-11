@@ -196,21 +196,29 @@ export class PolicyEngine {
    * Increment / decrement active workflow counter.
    */
   async trackWorkflowStart(tenantId: string): Promise<void> {
-    const key = `tenant_active_workflows:${tenantId}`;
-    const countStr = await this.env.WORKFLOW_STATE.get(key);
-    const count = countStr ? parseInt(countStr, 10) : 0;
-    await this.env.WORKFLOW_STATE.put(key, String(count + 1), {
-      expirationTtl: 86400,
-    });
+    try {
+      const key = `tenant_active_workflows:${tenantId}`;
+      const countStr = await this.env.WORKFLOW_STATE.get(key);
+      const count = countStr ? parseInt(countStr, 10) : 0;
+      await this.env.WORKFLOW_STATE.put(key, String(count + 1), {
+        expirationTtl: 86400,
+      });
+    } catch {
+      // Best-effort — KV daily write limit may be exceeded
+    }
   }
 
   async trackWorkflowEnd(tenantId: string): Promise<void> {
-    const key = `tenant_active_workflows:${tenantId}`;
-    const countStr = await this.env.WORKFLOW_STATE.get(key);
-    const count = countStr ? parseInt(countStr, 10) : 0;
-    await this.env.WORKFLOW_STATE.put(key, String(Math.max(0, count - 1)), {
-      expirationTtl: 86400,
-    });
+    try {
+      const key = `tenant_active_workflows:${tenantId}`;
+      const countStr = await this.env.WORKFLOW_STATE.get(key);
+      const count = countStr ? parseInt(countStr, 10) : 0;
+      await this.env.WORKFLOW_STATE.put(key, String(Math.max(0, count - 1)), {
+        expirationTtl: 86400,
+      });
+    } catch {
+      // Best-effort — KV daily write limit may be exceeded
+    }
   }
 }
 

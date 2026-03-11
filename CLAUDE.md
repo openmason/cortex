@@ -45,7 +45,6 @@ Runics (registry) ──→ Cognium (internal trust/scanning)
 - **KV SESSION_CACHE**: ID in `wrangler.toml`
 - **KV WORKFLOW_STATE**: ID in `wrangler.toml`
 - **R2 Bucket**: `cortex-artifacts`
-- **Queues**: `cortex-events` — workflow lifecycle events (completion, save-as-skill). Consumed by Forge independently.
 - **Service Binding**: `RUNICS_SERVICE` → `runics` worker
 
 ## Deploy Status
@@ -150,7 +149,7 @@ When a skill has no executable bundle (no `mcpUrl`, no `skillMd`, no `r2BundleKe
 - Backward compat: old states without `timeoutAt` are never lazily timed out
 
 ## Testing
-- 394 unit tests passing across 25 test files (`npx vitest run`)
+- 380 unit tests passing across 23 test files (`npx vitest run`)
 - Local dev tested with `npx wrangler dev` — health, models, and full run request all work
 - E2E verified live: codegen pipeline working end-to-end (findSkill → invokeSkill → codegen → Daytona → result)
 - E2E smoke test: `ADMIN_SECRET=<secret> npx tsx scripts/smoke-test.ts` (9 tests against live deployment)
@@ -193,22 +192,15 @@ Master specification: `cortex-specification.md`
 - **KV free-tier daily write limit** — `WORKFLOW_STATE` KV still hits the daily write cap for workflow state writes and health checks. API keys are now in Neon DB (resolved). Health check uses read-only KV check to avoid burning writes. Rate limiter and auth backfill KV writes are non-blocking (`waitUntil` + `try/catch`).
 - **gpt-oss-120b unreliable** — Workers AI model returns internal server errors (500). `TOOL_CALL_MODEL` is set to `claude-sonnet-latest` as a workaround. Model fallback in `agentLoop` handles failures gracefully.
 
-## Code Cleanup Needed
-The following files still contain direct Cognium/Forge integration that should be decoupled:
-- `src/clients/cognium.ts` — **Remove**. Trust scores come from Runics; Cognium is Runics' concern.
-- `src/clients/forge.ts` — **Remove**. Forge is independent; Cortex emits events, not direct calls.
-- `src/queues/cognium-consumer.ts` — **Remove**. Scanning is Runics→Cognium, not Cortex.
-- `src/queues/forge-consumer.ts` — **Remove**. Forge has its own consumer.
-- `src/agents/tools.ts` — Remove `CogniumClient` import and `cognium.checkTrust()` calls. Trust scores are already on skills from Runics; PolicyEngine handles threshold checks.
-- `src/workflow/engine.ts` — Remove `CogniumClient` and `ForgeClient` imports. Replace `forge.autoDistill()` with a generic event emit (queue message or webhook).
-- `src/agents/supervisor.ts` — Remove `ForgeClient` import. `save-as-skill` should emit an event, not call Forge directly.
-- `src/index.ts` — Remove `handleForgeMessage` and `handleCogniumMessage` imports and queue routing.
-- `src/types.ts` — Remove `FORGE_QUEUE`, `COGNIUM_QUEUE`, `COGNIUM_URL` from `Env`.
-- `wrangler.toml` — Replace `cortex-forge` and `cortex-cognium` queue bindings with a single `cortex-events` queue.
+## Decoupling Status (Completed)
+Cognium and Forge queue integrations have been removed. What remains:
+- `src/clients/cognium.ts` — **Kept** as a stateless trust checker. `CogniumClient.checkTrust()` validates appetite thresholds and revocation status. No env dependency, no queue access.
+- `src/clients/forge.ts` — **Kept** for `humanDistill()` only (user-initiated save-as-skill). `autoDistill()` and `generateSkill()` removed (Forge subscribes to events independently).
+- Queue consumers (`forge-consumer.ts`, `cognium-consumer.ts`) — **Deleted**.
+- `FORGE_QUEUE`, `COGNIUM_QUEUE`, `COGNIUM_URL` — **Removed** from `Env`, `wrangler.toml`, and all test mocks.
 
 ## Next Steps (Prioritized)
-1. **Decouple Cognium and Forge** — remove direct integrations per the cleanup list above. Replace with event emission.
-2. Observability — structured logging, Cloudflare Analytics Engine
-3. Webhook/callback support for long-running workflows
-4. Per-API-key usage tracking and billing metering
-5. E2E test for buildPlan multi-step workflow path (live, not just unit tests)
+1. Observability — structured logging, Cloudflare Analytics Engine
+2. Webhook/callback support for long-running workflows
+3. Per-API-key usage tracking and billing metering
+4. E2E test for buildPlan multi-step workflow path (live, not just unit tests)

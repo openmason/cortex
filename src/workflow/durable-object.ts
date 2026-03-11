@@ -11,7 +11,6 @@ import type {
 import { ExecutionRouter } from "../execution/router";
 import { CogniumClient } from "../clients/cognium";
 import { RunicsClient } from "../clients/runics";
-import { ForgeClient } from "../clients/forge";
 
 /**
  * WorkflowDurableObject — durable execution with pause/resume.
@@ -80,7 +79,7 @@ export class WorkflowDurableObject extends DurableObject<Env> {
       tenant: TenantContext;
     };
 
-    const cognium = new CogniumClient(this.env);
+    const cognium = new CogniumClient();
 
     // Build initial state
     const state: WorkflowState = {
@@ -286,10 +285,6 @@ export class WorkflowDurableObject extends DurableObject<Env> {
       state.completedAt = new Date().toISOString();
       await this.saveState(state);
       await this.ctx.storage.deleteAlarm();
-
-      // Trigger Forge auto-distillation (best effort)
-      const forge = new ForgeClient(this.env);
-      forge.autoDistill(state).catch(() => {});
     }
 
     return state;

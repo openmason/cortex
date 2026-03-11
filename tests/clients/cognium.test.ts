@@ -1,6 +1,6 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { CogniumClient, appetiteToTrustThreshold } from "../../src/clients/cognium";
-import type { Env, SkillReference } from "../../src/types";
+import type { SkillReference } from "../../src/types";
 
 function makeSkill(overrides: Partial<SkillReference> = {}): SkillReference {
   return {
@@ -19,12 +19,8 @@ function makeSkill(overrides: Partial<SkillReference> = {}): SkillReference {
   };
 }
 
-const mockEnv = {
-  COGNIUM_QUEUE: { send: vi.fn() },
-} as unknown as Env;
-
 describe("CogniumClient", () => {
-  const client = new CogniumClient(mockEnv);
+  const client = new CogniumClient();
 
   describe("checkTrust", () => {
     it("should allow published skills above trust threshold", () => {
@@ -112,18 +108,6 @@ describe("CogniumClient", () => {
     });
   });
 
-  describe("submitForScan", () => {
-    it("should enqueue a scan request", async () => {
-      await client.submitForScan("skill-1", "high");
-
-      expect(mockEnv.COGNIUM_QUEUE.send).toHaveBeenCalledWith(
-        expect.objectContaining({
-          skillId: "skill-1",
-          priority: "high",
-        }),
-      );
-    });
-  });
 });
 
 describe("appetiteToTrustThreshold", () => {
