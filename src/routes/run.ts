@@ -6,6 +6,8 @@ import { SupervisorAgent } from "../agents/supervisor";
 import { LLMClient, MODELS } from "../clients/llm";
 import { WorkflowEngine } from "../workflow/engine";
 import { requireScope } from "../middleware/auth";
+import { Logger } from "../observability/logger";
+import { Metrics } from "../observability/metrics";
 
 const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
@@ -42,13 +44,36 @@ app.post("/run", async (c) => {
     product: parsed.data.product ?? c.get("product"),
   };
 
+  const start = Date.now();
+  const log = new Logger("supervisor", {
+    requestId: c.get("requestId"),
+    tenantId: request.tenantId,
+    product: request.product,
+  });
+  const metrics = new Metrics(c.env.ANALYTICS);
+
   try {
-    const supervisor = new SupervisorAgent(c.env);
+    const supervisor = new SupervisorAgent(c.env, log, metrics);
     const response = await supervisor.handleRequest(request, c.executionCtx);
 
     const statusCode = response.status === "failed" ? 422 : 200;
+    metrics.write("request", {
+      requestId: c.get("requestId"),
+      tenantId: request.tenantId,
+      product: request.product,
+      status: response.status === "failed" ? "error" : "ok",
+      durationMs: Date.now() - start,
+    });
     return c.json(response, statusCode);
   } catch (err) {
+    metrics.write("request", {
+      requestId: c.get("requestId"),
+      tenantId: request.tenantId,
+      product: request.product,
+      status: "error",
+      error: err instanceof Error ? err.message : "Internal server error",
+      durationMs: Date.now() - start,
+    });
     return c.json(
       { error: err instanceof Error ? err.message : "Internal server error", status: "failed" },
       500,
@@ -85,7 +110,13 @@ app.post("/run/stream", async (c) => {
     };
 
     try {
-      const supervisor = new SupervisorAgent(c.env);
+      const log = new Logger("supervisor", {
+        requestId: c.get("requestId"),
+        tenantId: request.tenantId,
+        product: request.product,
+      });
+      const metrics = new Metrics(c.env.ANALYTICS);
+      const supervisor = new SupervisorAgent(c.env, log, metrics);
       await supervisor.handleRequestStreaming(request, c.executionCtx, onEvent);
     } catch (err) {
       await onEvent({
@@ -114,7 +145,9 @@ app.post("/run/:workflowId/resume", async (c) => {
     return c.json({ error: "Invalid request", details: parsed.error.flatten() }, 400);
   }
 
-  const supervisor = new SupervisorAgent(c.env);
+  const log = new Logger("supervisor", { requestId: c.get("requestId") });
+  const metrics = new Metrics(c.env.ANALYTICS);
+  const supervisor = new SupervisorAgent(c.env, log, metrics);
   const response = await supervisor.handleResume(
     workflowId,
     parsed.data.approved,
@@ -130,7 +163,8 @@ app.post("/run/:workflowId/resume", async (c) => {
 // ---------------------------------------------------------------------------
 app.get("/run/:workflowId", async (c) => {
   const workflowId = c.req.param("workflowId");
-  const engine = new WorkflowEngine(c.env);
+  const log = new Logger("engine", { requestId: c.get("requestId") });
+  const engine = new WorkflowEngine(c.env, undefined, log);
   let state = await engine.loadState(workflowId);
 
   if (!state) {
@@ -170,7 +204,8 @@ app.post("/run/:workflowId/save", async (c) => {
   }
 
   try {
-    const supervisor = new SupervisorAgent(c.env);
+    const log = new Logger("supervisor", { requestId: c.get("requestId") });
+    const supervisor = new SupervisorAgent(c.env, log);
     const result = await supervisor.saveAsSkill(
       workflowId,
       c.get("tenantId"),

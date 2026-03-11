@@ -18,6 +18,8 @@ import { PolicyEngine } from "../policy/engine";
 import { ConversationManager, type ConversationState } from "../conversation/manager";
 import { getProductConfig } from "./product-configs";
 import { ToolExecutor, getToolsForProduct } from "./tools";
+import type { Logger } from "../observability/logger";
+import type { Metrics } from "../observability/metrics";
 
 /**
  * Supervisor Agent — the brain of Cortex.
@@ -37,13 +39,17 @@ export class SupervisorAgent {
   private engine: WorkflowEngine;
   private policyEngine: PolicyEngine;
   private conversations: ConversationManager;
+  private log?: Logger;
+  private metrics?: Metrics;
 
-  constructor(private env: Env) {
+  constructor(private env: Env, log?: Logger, metrics?: Metrics) {
     this.runics = new RunicsClient(env);
     this.llm = new LLMClient(env);
-    this.engine = new WorkflowEngine(env, this.llm);
+    this.engine = new WorkflowEngine(env, this.llm, log?.child({ module: "engine" }), metrics);
     this.policyEngine = new PolicyEngine(env);
     this.conversations = new ConversationManager(env);
+    this.log = log;
+    this.metrics = metrics;
   }
 
   /**
@@ -93,7 +99,7 @@ export class SupervisorAgent {
     }
 
     // Create tool executor for this session
-    const toolExecutor = new ToolExecutor(this.env, tenant, this.llm);
+    const toolExecutor = new ToolExecutor(this.env, tenant, this.llm, this.log?.child({ module: "tools" }), this.metrics);
     const tools = getToolsForProduct(request.product);
 
     // Build messages with conversation history
@@ -303,7 +309,7 @@ export class SupervisorAgent {
       data: { conversationId, isNew: !request.conversationId, turnCount: convState.turnCount },
     });
 
-    const toolExecutor = new ToolExecutor(this.env, tenant, this.llm);
+    const toolExecutor = new ToolExecutor(this.env, tenant, this.llm, this.log?.child({ module: "tools" }), this.metrics);
     const tools = getToolsForProduct(request.product);
 
     // Build messages with conversation history

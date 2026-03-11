@@ -5,6 +5,8 @@ import { RunicsClient } from "../clients/runics";
 import { CogniumClient } from "../clients/cognium";
 import { PolicyEngine } from "../policy/engine";
 import { ExecutionRouter } from "../execution/router";
+import type { Logger } from "../observability/logger";
+import type { Metrics } from "../observability/metrics";
 
 // ---------------------------------------------------------------------------
 // Tool Definitions — JSON Schema for the LLM
@@ -184,11 +186,13 @@ export class ToolExecutor {
     private env: Env,
     private tenant: TenantContext,
     llm?: LLMClient,
+    log?: Logger,
+    metrics?: Metrics,
   ) {
     this.runics = new RunicsClient(env);
     this.cognium = new CogniumClient();
     this.policyEngine = new PolicyEngine(env);
-    this.executionRouter = new ExecutionRouter(env, llm);
+    this.executionRouter = new ExecutionRouter(env, llm, log?.child({ module: "router" }), metrics);
   }
 
   /**

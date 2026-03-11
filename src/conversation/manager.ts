@@ -1,5 +1,6 @@
 import type { ChatMessage } from "../clients/llm";
 import type { Env, Product } from "../types";
+import type { Logger } from "../observability/logger";
 
 // ---------------------------------------------------------------------------
 // Conversation State
@@ -71,8 +72,8 @@ export class ConversationManager {
         JSON.stringify(state),
         { expirationTtl: this.config.ttlSeconds },
       );
-    } catch (err) {
-      console.warn(`[conversation] KV save failed for ${state.conversationId}:`, err);
+    } catch {
+      // KV save is best-effort — don't block the request
     }
   }
 

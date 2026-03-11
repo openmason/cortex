@@ -2,6 +2,8 @@ import type { Env, ExecutionLayer, ExecutionResult, SkillReference } from "../ty
 import { DaytonaClient } from "../clients/daytona";
 import { WorkerDispatch } from "./worker-dispatch";
 import type { LLMClient } from "../clients/llm";
+import type { Logger } from "../observability/logger";
+import type { Metrics } from "../observability/metrics";
 
 /**
  * Execution Router — maps skill.execution_layer to the right runtime.
@@ -18,11 +20,15 @@ export class ExecutionRouter {
   private daytona: DaytonaClient;
   private workerDispatch: WorkerDispatch;
   private llm: LLMClient | null;
+  private log?: Logger;
+  private metrics?: Metrics;
 
-  constructor(env: Env, llm?: LLMClient) {
+  constructor(env: Env, llm?: LLMClient, log?: Logger, metrics?: Metrics) {
     this.daytona = new DaytonaClient(env);
     this.workerDispatch = new WorkerDispatch(env);
     this.llm = llm ?? null;
+    this.log = log;
+    this.metrics = metrics;
   }
 
   async execute(
@@ -33,36 +39,44 @@ export class ExecutionRouter {
     const start = Date.now();
 
     try {
+      let result: ExecutionResult;
+
       switch (skill.executionLayer) {
         case "mcp-remote":
-          return await this.executeL0(skill, input, start);
+          result = await this.executeL0(skill, input, start);
+          break;
 
         case "instructions":
-          return await this.executeL1(skill, input, start);
+          result = await this.executeL1(skill, input, start);
+          break;
 
         case "worker": {
-          const result = await this.workerDispatch.execute(skill, input);
+          const workerResult = await this.workerDispatch.execute(skill, input);
           // If worker failed because bundle not found, try codegen fallback
-          if (!result.success && result.error?.includes("Bundle not found") && this.llm) {
-            return await this.executeCodegen(skill, input, start);
+          if (!workerResult.success && workerResult.error?.includes("Bundle not found") && this.llm) {
+            result = await this.executeCodegen(skill, input, start);
+          } else {
+            result = workerResult;
           }
-          return result;
+          break;
         }
 
         case "container":
-          return await this.executeL3(skill, input, start);
+          result = await this.executeL3(skill, input, start);
+          break;
 
         case "composite":
-          return {
+          result = {
             success: false,
             output: null,
             durationMs: Date.now() - start,
             layer: skill.executionLayer,
             error: "Composite skills must be expanded by the supervisor before execution",
           };
+          break;
 
         default:
-          return {
+          result = {
             success: false,
             output: null,
             durationMs: Date.now() - start,
@@ -70,11 +84,27 @@ export class ExecutionRouter {
             error: `Unknown execution layer: ${skill.executionLayer}`,
           };
       }
+
+      this.metrics?.write("skill_exec", {
+        skillSlug: skill.slug,
+        status: result.success ? "ok" : "error",
+        durationMs: result.durationMs,
+        error: result.error,
+      });
+
+      return result;
     } catch (err) {
+      const durationMs = Date.now() - start;
+      this.metrics?.write("skill_exec", {
+        skillSlug: skill.slug,
+        status: "error",
+        durationMs,
+        error: err instanceof Error ? err.message : String(err),
+      });
       return {
         success: false,
         output: null,
-        durationMs: Date.now() - start,
+        durationMs,
         layer: skill.executionLayer,
         error: err instanceof Error ? err.message : String(err),
       };
@@ -241,6 +271,8 @@ export class ExecutionRouter {
       };
     }
 
+    this.log?.info("Codegen fallback", { skillSlug: skill.slug });
+
     // 1. Ask the LLM to generate code
     const description = (skill as any).agentSummary ?? (skill as any).description ?? skill.name;
     const prompt = `You are a code generator. Your ONLY output must be raw JavaScript code — no markdown, no fences, no explanation, no comments before or after the code.
@@ -284,6 +316,8 @@ Rules:
     }
 
     code = this.stripFences(code);
+
+    this.metrics?.write("codegen", { skillSlug: skill.slug, durationMs: Date.now() - start });
 
     // 2. Execute in Daytona sandbox using codeRun (no file writing needed)
     let result = await this.daytona.runCode(code, 30);

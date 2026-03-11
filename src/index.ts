@@ -11,6 +11,8 @@ import skillRoutes from "./routes/skills";
 import demoRoutes from "./routes/demo";
 import { WorkflowEngine } from "./workflow/engine";
 import { DaytonaClient } from "./clients/daytona";
+import { Logger } from "./observability/logger";
+import { Metrics } from "./observability/metrics";
 
 // Re-export the Durable Object class (required by wrangler)
 export { WorkflowDurableObject } from "./workflow/durable-object";
@@ -21,7 +23,8 @@ const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 // Global error handler
 // ---------------------------------------------------------------------------
 app.onError((err, c) => {
-  console.error("[cortex] Unhandled error:", err);
+  const log = new Logger("cortex", { requestId: c.get("requestId") });
+  log.error("Unhandled error", { error: err.message, stack: err.stack });
   return c.json(
     { error: err.message || "Internal server error", status: "failed" },
     500,
@@ -33,6 +36,15 @@ app.onError((err, c) => {
 // ---------------------------------------------------------------------------
 app.use("*", cors());
 app.use("*", logger());
+
+// Request ID — propagate or generate
+app.use("*", async (c, next) => {
+  const requestId = c.req.header("X-Request-ID") ?? crypto.randomUUID();
+  c.set("requestId", requestId);
+  c.header("X-Request-ID", requestId);
+  await next();
+});
+
 app.use("/v1/*", authMiddleware);
 app.use("/v1/run", rateLimitMiddleware);
 app.use("/v1/run/*", rateLimitMiddleware);
@@ -63,13 +75,17 @@ app.get("/", (c) =>
 async function handleScheduled(
   event: ScheduledEvent,
   env: Env,
-  ctx: ExecutionContext,
+  _ctx: ExecutionContext,
 ): Promise<void> {
-  console.log(`[cron] Triggered at ${new Date(event.scheduledTime).toISOString()}`);
+  const log = new Logger("cron");
+  const metrics = new Metrics(env.ANALYTICS);
+  const start = Date.now();
+
+  log.info("Triggered", { scheduledTime: new Date(event.scheduledTime).toISOString() });
 
   // Sweep paused workflows that have exceeded their timeout
   try {
-    const engine = new WorkflowEngine(env);
+    const engine = new WorkflowEngine(env, undefined, log.child({ task: "sweep" }), metrics);
     const list = await env.WORKFLOW_STATE.list({ prefix: "workflow:" });
     let expired = 0;
 
@@ -89,10 +105,10 @@ async function handleScheduled(
     }
 
     if (expired > 0) {
-      console.log(`[cron] Timed out ${expired} paused workflow(s)`);
+      log.info("Timed out paused workflows", { expired });
     }
   } catch (err) {
-    console.error("[cron] Workflow sweep failed:", err);
+    log.error("Workflow sweep failed", { error: err instanceof Error ? err.message : String(err) });
   }
 
   // Clean up orphaned Daytona sandboxes
@@ -100,11 +116,13 @@ async function handleScheduled(
     const daytona = new DaytonaClient(env);
     const cleaned = await daytona.cleanup();
     if (cleaned > 0) {
-      console.log(`[cron] Cleaned up ${cleaned} orphaned Daytona sandbox(es)`);
+      log.info("Cleaned up orphaned Daytona sandboxes", { cleaned });
     }
   } catch (err) {
-    console.error("[cron] Daytona cleanup failed:", err);
+    log.error("Daytona cleanup failed", { error: err instanceof Error ? err.message : String(err) });
   }
+
+  metrics.write("cron", { status: "ok", durationMs: Date.now() - start });
 }
 
 export default {

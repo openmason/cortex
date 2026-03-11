@@ -16,6 +16,8 @@ import { RunicsClient } from "../clients/runics";
 import { WorkflowRepository } from "../db/repository";
 import { resolveInputMapping } from "./input-mapping";
 import type { LLMClient } from "../clients/llm";
+import type { Logger } from "../observability/logger";
+import type { Metrics } from "../observability/metrics";
 
 /**
  * Workflow Engine — orchestrates the full request lifecycle.
@@ -31,15 +33,19 @@ export class WorkflowEngine {
   private cognium: CogniumClient;
   private runics: RunicsClient;
   private repo: WorkflowRepository | null;
+  private log?: Logger;
+  private metrics?: Metrics;
 
-  constructor(private env: Env, llm?: LLMClient) {
-    this.executor = new ExecutionRouter(env, llm);
+  constructor(private env: Env, llm?: LLMClient, log?: Logger, metrics?: Metrics) {
+    this.executor = new ExecutionRouter(env, llm, log?.child({ module: "router" }), metrics);
     this.cognium = new CogniumClient();
     this.runics = new RunicsClient(env);
+    this.log = log;
+    this.metrics = metrics;
 
     // DB repository is optional — only available when Hyperdrive is configured
     try {
-      this.repo = new WorkflowRepository(env);
+      this.repo = new WorkflowRepository(env, log?.child({ module: "db" }));
     } catch {
       this.repo = null;
     }
@@ -149,6 +155,7 @@ export class WorkflowEngine {
     await this.persistState(state);
 
     const maxDepth = parseInt(this.env.MAX_SKILL_CHAIN_DEPTH, 10) || 10;
+    const workflowStart = Date.now();
 
     for (let i = state.currentStepIndex; i < state.plan.steps.length; i++) {
       if (i >= maxDepth) {
@@ -285,6 +292,13 @@ export class WorkflowEngine {
       state.completedAt = new Date().toISOString();
       await this.persistState(state);
 
+      this.metrics?.write("workflow", {
+        tenantId: state.tenantId,
+        product: state.product,
+        status: "ok",
+        durationMs: Date.now() - workflowStart,
+      });
+
       await onEvent?.({
         event: "workflow_complete",
         data: { workflowId: state.workflowId, status: state.status },
@@ -324,7 +338,7 @@ export class WorkflowEngine {
 
       if (this.repo) {
         this.repo.updateSession(state).catch((err) =>
-          console.error("[engine] Failed to update timed_out session in DB:", err),
+          this.log?.error("Failed to update timed_out session in DB", { error: err instanceof Error ? err.message : String(err), workflowId: state.workflowId }),
         );
       }
     }
@@ -347,7 +361,7 @@ export class WorkflowEngine {
         { expirationTtl: 86400 * 7 }, // 7 days
       );
     } catch (err) {
-      console.warn(`[engine] KV persist failed for ${state.workflowId}:`, err);
+      this.log?.warn("KV persist failed", { workflowId: state.workflowId, error: err instanceof Error ? err.message : String(err) });
     }
   }
 
@@ -382,7 +396,7 @@ export class WorkflowEngine {
         error: session.error ?? undefined,
       };
     } catch (err) {
-      console.error("[engine] DB fallback failed for loadState:", err);
+      this.log?.error("DB fallback failed for loadState", { error: err instanceof Error ? err.message : String(err), workflowId });
       return null;
     }
   }

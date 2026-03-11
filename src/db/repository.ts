@@ -4,6 +4,7 @@ import { eq, and, desc, isNull } from "drizzle-orm";
 import type { Env, WorkflowState, WorkflowPlan, ExecutionResult, ApiKeyData } from "../types";
 import { workflowSessions, workflowStepExecutions, executionTraces, tenantPolicies, apiKeys } from "./schema";
 import type { TenantPolicy } from "../policy/engine";
+import type { Logger } from "../observability/logger";
 
 /**
  * Database Repository — persists workflow data to Neon via Hyperdrive.
@@ -17,12 +18,14 @@ import type { TenantPolicy } from "../policy/engine";
  */
 export class WorkflowRepository {
   private db;
+  private log?: Logger;
 
-  constructor(env: Env) {
+  constructor(env: Env, log?: Logger) {
     // Hyperdrive exposes a postgres:// connectionString for edge connection pooling.
     // postgres.js (not the Neon HTTP driver) is required for Hyperdrive compatibility.
     const sql = postgres(env.HYPERDRIVE.connectionString, { prepare: false });
     this.db = drizzle(sql);
+    this.log = log;
   }
 
   /**
@@ -43,7 +46,7 @@ export class WorkflowRepository {
         startedAt: new Date(state.startedAt),
       });
     } catch (err) {
-      console.error("[db] Failed to create session:", err);
+      this.log?.error("Failed to create session", { error: err instanceof Error ? err.message : String(err), workflowId: state.workflowId });
     }
   }
 
@@ -66,7 +69,7 @@ export class WorkflowRepository {
         })
         .where(eq(workflowSessions.id, state.workflowId));
     } catch (err) {
-      console.error("[db] Failed to update session:", err);
+      this.log?.error("Failed to update session", { error: err instanceof Error ? err.message : String(err), workflowId: state.workflowId });
     }
   }
 
@@ -97,7 +100,7 @@ export class WorkflowRepository {
         completedAt: new Date(),
       });
     } catch (err) {
-      console.error("[db] Failed to record step execution:", err);
+      this.log?.error("Failed to record step execution", { error: err instanceof Error ? err.message : String(err), sessionId, stepOrder, skillSlug: skill.slug });
     }
   }
 
@@ -135,7 +138,7 @@ export class WorkflowRepository {
         userModifiedPlan,
       });
     } catch (err) {
-      console.error("[db] Failed to write trace:", err);
+      this.log?.error("Failed to write trace", { error: err instanceof Error ? err.message : String(err), workflowId: state.workflowId });
     }
   }
 
@@ -152,7 +155,7 @@ export class WorkflowRepository {
         })
         .where(eq(executionTraces.sessionId, sessionId));
     } catch (err) {
-      console.error("[db] Failed to mark trace as saved:", err);
+      this.log?.error("Failed to mark trace as saved", { error: err instanceof Error ? err.message : String(err), sessionId, skillId });
     }
   }
 
@@ -170,7 +173,7 @@ export class WorkflowRepository {
 
       return sessions.length > 0 ? sessions[0] : null;
     } catch (err) {
-      console.error("[db] Failed to get session by workflowId:", err);
+      this.log?.error("Failed to get session by workflowId", { error: err instanceof Error ? err.message : String(err), workflowId });
       return null;
     }
   }
@@ -207,7 +210,7 @@ export class WorkflowRepository {
         maxConcurrentWorkflows: row.maxConcurrentWorkflows ?? 10,
       };
     } catch (err) {
-      console.error("[db] Failed to load policy:", err);
+      this.log?.error("Failed to load policy", { error: err instanceof Error ? err.message : String(err), tenantId, product });
       return null;
     }
   }
@@ -257,7 +260,7 @@ export class WorkflowRepository {
 
       return filtered;
     } catch (err) {
-      console.error("[db] Failed to list sessions:", err);
+      this.log?.error("Failed to list sessions", { error: err instanceof Error ? err.message : String(err), tenantId });
       return [];
     }
   }
@@ -291,7 +294,7 @@ export class WorkflowRepository {
         steps,
       };
     } catch (err) {
-      console.error("[db] Failed to get session detail:", err);
+      this.log?.error("Failed to get session detail", { error: err instanceof Error ? err.message : String(err), sessionId, tenantId });
       return null;
     }
   }
@@ -314,7 +317,7 @@ export class WorkflowRepository {
 
       return traces.length > 0 ? traces[0] : null;
     } catch (err) {
-      console.error("[db] Failed to get session trace:", err);
+      this.log?.error("Failed to get session trace", { error: err instanceof Error ? err.message : String(err), sessionId, tenantId });
       return null;
     }
   }
@@ -337,7 +340,7 @@ export class WorkflowRepository {
         createdAt: new Date(data.createdAt),
       });
     } catch (err) {
-      console.error("[db] Failed to create API key:", err);
+      this.log?.error("Failed to create API key", { error: err instanceof Error ? err.message : String(err), tenantId: data.tenantId });
       throw err;
     }
   }
@@ -364,7 +367,7 @@ export class WorkflowRepository {
         createdAt: row.createdAt?.toISOString() ?? new Date().toISOString(),
       };
     } catch (err) {
-      console.error("[db] Failed to get API key:", err);
+      this.log?.error("Failed to get API key", { error: err instanceof Error ? err.message : String(err) });
       return null;
     }
   }
@@ -379,7 +382,7 @@ export class WorkflowRepository {
         .set({ revokedAt: new Date() })
         .where(eq(apiKeys.key, key));
     } catch (err) {
-      console.error("[db] Failed to revoke API key:", err);
+      this.log?.error("Failed to revoke API key", { error: err instanceof Error ? err.message : String(err) });
       throw err;
     }
   }
@@ -429,7 +432,7 @@ export class WorkflowRepository {
         });
       }
     } catch (err) {
-      console.error("[db] Failed to upsert policy:", err);
+      this.log?.error("Failed to upsert policy", { error: err instanceof Error ? err.message : String(err), tenantId: policy.tenantId, product: policy.product });
     }
   }
 }

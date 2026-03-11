@@ -149,7 +149,7 @@ When a skill has no executable bundle (no `mcpUrl`, no `skillMd`, no `r2BundleKe
 - Backward compat: old states without `timeoutAt` are never lazily timed out
 
 ## Testing
-- 380 unit tests passing across 23 test files (`npx vitest run`)
+- 396 unit tests passing across 25 test files (`npx vitest run`)
 - Local dev tested with `npx wrangler dev` — health, models, and full run request all work
 - E2E verified live: codegen pipeline working end-to-end (findSkill → invokeSkill → codegen → Daytona → result)
 - E2E smoke test: `ADMIN_SECRET=<secret> npx tsx scripts/smoke-test.ts` (9 tests against live deployment)
@@ -199,8 +199,16 @@ Cognium and Forge queue integrations have been removed. What remains:
 - Queue consumers (`forge-consumer.ts`, `cognium-consumer.ts`) — **Deleted**.
 - `FORGE_QUEUE`, `COGNIUM_QUEUE`, `COGNIUM_URL` — **Removed** from `Env`, `wrangler.toml`, and all test mocks.
 
+## Observability
+- **Structured logging**: `src/observability/logger.ts` — JSON output via console.log/warn/error/debug, child loggers, level filtering (debug < info < warn < error)
+- **Metrics**: `src/observability/metrics.ts` — Cloudflare Analytics Engine `writeDataPoint()`, fire-and-forget, no-op when binding missing
+- **Analytics Engine dataset**: `cortex_metrics` (binding: `ANALYTICS`) — index: tenantId, blobs: [event, requestId, product, skillSlug, status, error], doubles: [durationMs, tokens]
+- **Request ID**: `X-Request-ID` header propagated/generated on every request, threaded through Logger context
+- **Constructor chain**: Logger + Metrics created per-request in route handlers, passed through Supervisor → Engine → Router → Repository via optional constructor params
+- **Instrumentation points**: request (run handler), skill_exec (router), codegen (router), workflow (engine), cron (index.ts)
+
 ## Next Steps (Prioritized)
-1. Observability — structured logging, Cloudflare Analytics Engine
-2. Webhook/callback support for long-running workflows
-3. Per-API-key usage tracking and billing metering
-4. E2E test for buildPlan multi-step workflow path (live, not just unit tests)
+1. Webhook/callback support for long-running workflows
+2. Per-API-key usage tracking and billing metering
+3. E2E test for buildPlan multi-step workflow path (live, not just unit tests)
+4. LLM call metrics — instrument LLMClient with Logger/Metrics

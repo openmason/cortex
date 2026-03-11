@@ -17,6 +17,9 @@ export interface Env {
   // Workers AI
   AI: Ai;
 
+  // Analytics Engine
+  ANALYTICS?: AnalyticsEngineDataset;
+
   // Durable Objects
   WORKFLOW_DO: DurableObjectNamespace;
 
@@ -61,6 +64,7 @@ export interface AppVariables {
   userId: string;
   product: Product;
   scopes: string[];
+  requestId: string;
 }
 
 // ---------------------------------------------------------------------------
