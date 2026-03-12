@@ -238,6 +238,11 @@ app.get("/models", async (c) => {
       models: models.map((m) => ({
         id: m.id,
         owned_by: m.owned_by,
+        supports_tool_calls: m.supports_tool_calls,
+        supports_streaming: m.supports_streaming,
+        max_context_tokens: m.max_context_tokens,
+        provider: m.provider,
+        tier: m.tier,
       })),
       default: c.env.LLM_MODEL,
       aliases: MODELS,

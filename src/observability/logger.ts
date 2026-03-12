@@ -36,6 +36,11 @@ export class Logger {
     this.minLevel = LEVEL_ORDER[level ?? "info"];
   }
 
+  /** Access the logger's context (e.g., to extract requestId for correlation headers). */
+  getContext(): Readonly<LogContext> {
+    return this.context;
+  }
+
   /** Create a child logger with additional context merged in. */
   child(extra: Record<string, unknown>): Logger {
     const child = new Logger(this.module, { ...this.context, ...extra });

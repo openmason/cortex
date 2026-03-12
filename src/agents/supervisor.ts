@@ -112,13 +112,14 @@ export class SupervisorAgent {
     );
 
     // Run the agentic loop — the LLM will call findSkill, checkPolicy, buildPlan, etc.
+    const toolModel = await this.llm.getToolCallModel();
     let agentResult: { messages: ChatMessage[]; finalContent: string };
     try {
       agentResult = await this.llm.agentLoop(
         messages,
         tools,
         (name, args) => toolExecutor.execute(name, args, executionCtx),
-        { model: this.env.TOOL_CALL_MODEL, maxTurns: 8, temperature: 0.2 },
+        { model: toolModel, maxTurns: 8, temperature: 0.2 },
       );
     } catch (err) {
       return {
@@ -323,13 +324,14 @@ export class SupervisorAgent {
 
     await onEvent({ event: "planning", data: { prompt: request.prompt, product: request.product } });
 
+    const toolModel = await this.llm.getToolCallModel();
     let agentResult: { messages: ChatMessage[]; finalContent: string };
     try {
       agentResult = await this.llm.agentLoop(
         messages,
         tools,
         (name, args) => toolExecutor.execute(name, args, executionCtx),
-        { model: this.env.TOOL_CALL_MODEL, maxTurns: 8, temperature: 0.2, onEvent },
+        { model: toolModel, maxTurns: 8, temperature: 0.2, onEvent },
       );
     } catch (err) {
       const errorMsg = `LLM planning failed: ${err instanceof Error ? err.message : String(err)}`;

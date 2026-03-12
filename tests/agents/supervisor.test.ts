@@ -5,6 +5,10 @@ import type { Env, RunRequest } from "../../src/types";
 function makeMockEnv(): Env {
   const kvStore = new Map<string, string>();
   const sessionStore = new Map<string, string>();
+  // Seed model capabilities cache so getToolCallModel() doesn't call /v1/models
+  sessionStore.set("models:capabilities", JSON.stringify([
+    { id: "claude-sonnet-4-20250514", object: "model", supports_tool_calls: true },
+  ]));
   return {
     SESSION_CACHE: {
       put: vi.fn(async (key: string, value: string) => { sessionStore.set(key, value); }),

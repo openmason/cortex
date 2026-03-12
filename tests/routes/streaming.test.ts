@@ -36,6 +36,11 @@ function makeMockEnv(): Env {
     }),
   );
 
+  // Seed model capabilities cache so getToolCallModel() doesn't call /v1/models
+  sessionStore.set("models:capabilities", JSON.stringify([
+    { id: "cognium/claude-sonnet-latest", object: "model", supports_tool_calls: true },
+  ]));
+
   return {
     SESSION_CACHE: {
       put: vi.fn(async (key: string, value: string) => {

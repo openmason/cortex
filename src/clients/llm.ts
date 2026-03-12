@@ -67,6 +67,12 @@ export interface ProxyModel {
   object: string;
   created?: number;
   owned_by?: string;
+  // Capability metadata (v0.5.3+)
+  supports_tool_calls?: boolean;
+  supports_streaming?: boolean;
+  max_context_tokens?: number;
+  provider?: string;
+  tier?: string;
 }
 
 export interface ProxyModelsResponse {
@@ -99,10 +105,16 @@ export const MODELS = {
 
 export type ModelAlias = (typeof MODELS)[keyof typeof MODELS];
 
+// KV cache key + TTL for model capabilities
+const MODEL_CACHE_KEY = "models:capabilities";
+const MODEL_CACHE_TTL = 300; // 5 minutes
+
 export class LLMClient {
   private baseUrl: string;
   private apiKey: string;
   private model: string;
+  private toolCallModelOverride?: string;
+  private kv?: KVNamespace;
   private log?: Logger;
   private metrics?: Metrics;
 
@@ -110,6 +122,8 @@ export class LLMClient {
     this.baseUrl = env.LLMPROXY_URL;
     this.apiKey = env.LLMPROXY_API_KEY;
     this.model = env.LLM_MODEL;
+    this.toolCallModelOverride = env.TOOL_CALL_MODEL;
+    this.kv = env.SESSION_CACHE;
     this.log = log;
     this.metrics = metrics;
   }
@@ -121,12 +135,16 @@ export class LLMClient {
     const model = request.model ?? this.model;
     const start = Date.now();
 
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${this.apiKey}`,
+    };
+    const requestId = this.log?.getContext().requestId;
+    if (requestId) headers["X-Request-ID"] = requestId;
+
     const res = await fetch(`${this.baseUrl}/v1/chat/completions`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${this.apiKey}`,
-      },
+      headers,
       body: JSON.stringify({
         ...request,
         model,
@@ -141,15 +159,17 @@ export class LLMClient {
       throw new Error(`LLM proxy request failed: ${res.status} ${text}`);
     }
 
+    const proxyReqId = res.headers?.get?.("X-Proxy-Request-ID") ?? undefined;
     const response: ChatCompletionResponse = await res.json();
     const durationMs = Date.now() - start;
-    const tokens = response.usage?.total_tokens ?? 0;
+    const tokens = response.usage.total_tokens;
 
     this.log?.debug("LLM chat completed", {
       model: response.model,
       durationMs,
       tokens,
       finishReason: response.choices[0]?.finish_reason,
+      proxyReqId,
     });
     this.metrics?.write("llm_call", { status: "ok", durationMs, tokens });
 
@@ -173,6 +193,80 @@ export class LLMClient {
 
     const data: ProxyModelsResponse = await res.json();
     return data.data;
+  }
+
+  /**
+   * Resolve the best model for tool calling.
+   *
+   * Priority:
+   * 1. TOOL_CALL_MODEL env override (if set and tool-capable)
+   * 2. Best tool-capable model from proxy capabilities (KV-cached)
+   * 3. Default LLM_MODEL as final fallback
+   */
+  async getToolCallModel(): Promise<string> {
+    // If override is set and we have no capability data, trust the override
+    const override = this.toolCallModelOverride;
+
+    try {
+      const models = await this.getCachedModels();
+      if (models.length === 0) return override ?? this.model;
+
+      // If override is explicitly set, validate it's tool-capable
+      if (override) {
+        const overrideModel = models.find((m) => m.id === override);
+        if (!overrideModel || overrideModel.supports_tool_calls !== false) {
+          return override; // trust the override (unknown or capable)
+        }
+        this.log?.warn("TOOL_CALL_MODEL override is not tool-capable, selecting from capabilities", {
+          override,
+        });
+      }
+
+      // Select best tool-capable model: prefer same as default, then any capable model
+      const capable = models.filter((m) => m.supports_tool_calls === true);
+      if (capable.length === 0) return override ?? this.model;
+
+      // Prefer the default model if it's tool-capable
+      const defaultCapable = capable.find((m) => m.id === this.model);
+      if (defaultCapable) return defaultCapable.id;
+
+      // Otherwise pick the first capable model
+      return capable[0].id;
+    } catch {
+      // Capability lookup failed — fall back to override or default
+      return override ?? this.model;
+    }
+  }
+
+  /**
+   * Get models list with KV caching to avoid per-request /v1/models calls.
+   */
+  private async getCachedModels(): Promise<ProxyModel[]> {
+    // Try KV cache first
+    if (this.kv) {
+      try {
+        const cached = await this.kv.get(MODEL_CACHE_KEY);
+        if (cached) return JSON.parse(cached);
+      } catch {
+        // Cache read failed — fall through to live fetch
+      }
+    }
+
+    // Fetch from proxy
+    const models = await this.listModels();
+
+    // Backfill cache (best-effort)
+    if (this.kv) {
+      try {
+        await this.kv.put(MODEL_CACHE_KEY, JSON.stringify(models), {
+          expirationTtl: MODEL_CACHE_TTL,
+        });
+      } catch {
+        // Cache write failed — non-critical
+      }
+    }
+
+    return models;
   }
 
   /**
@@ -220,12 +314,8 @@ export class LLMClient {
         throw new Error("LLM proxy returned no choices");
       }
 
-      // Add the assistant message (coerce null content to empty string for
-      // proxy compatibility — some proxies reject null on assistant messages)
-      allMessages.push({
-        ...choice.message,
-        content: choice.message.content ?? "",
-      });
+      // Add the assistant message (proxy v0.5.2+ accepts content:null natively)
+      allMessages.push(choice.message);
 
       // If the model didn't call any tools, we're done
       if (choice.finish_reason !== "tool_calls" || !choice.message.tool_calls?.length) {

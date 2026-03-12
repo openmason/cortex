@@ -8,6 +8,8 @@ const mockEnv = {
   LLM_MODEL: "claude-sonnet-4-20250514",
 } as unknown as Env;
 
+const defaultHeaders = { get: (k: string) => k === "X-Proxy-Request-ID" ? "abc12345" : null };
+
 function makeChatResponse(content: string | null, toolCalls?: any[], finishReason = "stop") {
   return {
     id: "chatcmpl-1",
@@ -27,6 +29,10 @@ function makeChatResponse(content: string | null, toolCalls?: any[], finishReaso
   };
 }
 
+function mockOk(body: unknown) {
+  return { ok: true, headers: defaultHeaders, json: () => Promise.resolve(body) };
+}
+
 describe("LLMClient", () => {
   let client: LLMClient;
 
@@ -38,10 +44,7 @@ describe("LLMClient", () => {
   describe("chat", () => {
     it("should send a chat completion request to LiteLLM", async () => {
       const response = makeChatResponse("Hello, I can help with that.");
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve(response),
-      }));
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockOk(response)));
 
       const result = await client.chat({
         messages: [
@@ -63,10 +66,7 @@ describe("LLMClient", () => {
     });
 
     it("should use the configured model by default", async () => {
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve(makeChatResponse("ok")),
-      }));
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockOk(makeChatResponse("ok"))));
 
       await client.chat({ messages: [{ role: "user", content: "hi" }] });
 
@@ -75,10 +75,7 @@ describe("LLMClient", () => {
     });
 
     it("should allow overriding the model", async () => {
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve(makeChatResponse("ok")),
-      }));
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockOk(makeChatResponse("ok"))));
 
       await client.chat({
         model: "gpt-4o",
@@ -109,9 +106,9 @@ describe("LLMClient", () => {
         json: () => Promise.resolve({
           object: "list",
           data: [
-            { id: "cognium/claude-sonnet-latest", object: "model", owned_by: "anthropic" },
-            { id: "cognium/deepseek-latest", object: "model", owned_by: "deepseek" },
-            { id: "cognium/gpt-oss-120b", object: "model", owned_by: "cloudflare" },
+            { id: "cognium/claude-sonnet-latest", object: "model", owned_by: "anthropic", supports_tool_calls: true },
+            { id: "cognium/deepseek-latest", object: "model", owned_by: "deepseek", supports_tool_calls: true },
+            { id: "cognium/gpt-oss-120b", object: "model", owned_by: "cloudflare", supports_tool_calls: false },
           ],
         }),
       }));
@@ -120,6 +117,8 @@ describe("LLMClient", () => {
 
       expect(models).toHaveLength(3);
       expect(models[0].id).toBe("cognium/claude-sonnet-latest");
+      expect(models[0].supports_tool_calls).toBe(true);
+      expect(models[2].supports_tool_calls).toBe(false);
       expect(fetch).toHaveBeenCalledWith(
         "https://llmproxy.test.local/v1/models",
         expect.objectContaining({
@@ -140,12 +139,104 @@ describe("LLMClient", () => {
     });
   });
 
-  describe("agentLoop", () => {
-    it("should return immediately when no tool calls", async () => {
+  describe("getToolCallModel", () => {
+    it("should return TOOL_CALL_MODEL override when set and capable", async () => {
+      const envWithOverride = {
+        ...mockEnv,
+        TOOL_CALL_MODEL: "cognium/claude-opus-latest",
+        SESSION_CACHE: { get: vi.fn().mockResolvedValue(null), put: vi.fn().mockResolvedValue(undefined) },
+      } as unknown as Env;
+      const c = new LLMClient(envWithOverride);
+
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve(makeChatResponse("I found the answer.")),
+        json: () => Promise.resolve({
+          object: "list",
+          data: [
+            { id: "cognium/claude-opus-latest", object: "model", supports_tool_calls: true },
+            { id: "cognium/gpt-oss-120b", object: "model", supports_tool_calls: false },
+          ],
+        }),
       }));
+
+      const model = await c.getToolCallModel();
+      expect(model).toBe("cognium/claude-opus-latest");
+    });
+
+    it("should skip non-capable override and select from capabilities", async () => {
+      const envWithBadOverride = {
+        ...mockEnv,
+        TOOL_CALL_MODEL: "cognium/gpt-oss-120b",
+        SESSION_CACHE: { get: vi.fn().mockResolvedValue(null), put: vi.fn().mockResolvedValue(undefined) },
+      } as unknown as Env;
+      const c = new LLMClient(envWithBadOverride);
+
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({
+          object: "list",
+          data: [
+            { id: "cognium/claude-sonnet-latest", object: "model", supports_tool_calls: true },
+            { id: "cognium/gpt-oss-120b", object: "model", supports_tool_calls: false },
+          ],
+        }),
+      }));
+
+      const model = await c.getToolCallModel();
+      expect(model).not.toBe("cognium/gpt-oss-120b");
+      expect(model).toBe("cognium/claude-sonnet-latest");
+    });
+
+    it("should fall back to default model when capability lookup fails", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 503 }));
+
+      const model = await client.getToolCallModel();
+      expect(model).toBe("claude-sonnet-4-20250514"); // LLM_MODEL default
+    });
+
+    it("should use KV cache when available", async () => {
+      const cached = JSON.stringify([
+        { id: "cognium/cached-model", object: "model", supports_tool_calls: true },
+      ]);
+      const envWithCache = {
+        ...mockEnv,
+        SESSION_CACHE: { get: vi.fn().mockResolvedValue(cached), put: vi.fn() },
+      } as unknown as Env;
+      const c = new LLMClient(envWithCache);
+
+      const model = await c.getToolCallModel();
+      expect(model).toBe("cognium/cached-model");
+      expect(fetch).not.toHaveBeenCalled(); // should not fetch, used cache
+    });
+
+    it("should prefer default model if it is tool-capable", async () => {
+      const envWithKV = {
+        LLMPROXY_URL: "https://llmproxy.test.local",
+        LLMPROXY_API_KEY: "test-api-key",
+        LLM_MODEL: "cognium/claude-sonnet-latest",
+        SESSION_CACHE: { get: vi.fn().mockResolvedValue(null), put: vi.fn().mockResolvedValue(undefined) },
+      } as unknown as Env;
+      const c = new LLMClient(envWithKV);
+
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({
+          object: "list",
+          data: [
+            { id: "cognium/claude-opus-latest", object: "model", supports_tool_calls: true },
+            { id: "cognium/claude-sonnet-latest", object: "model", supports_tool_calls: true },
+          ],
+        }),
+      }));
+
+      const model = await c.getToolCallModel();
+      expect(model).toBe("cognium/claude-sonnet-latest"); // prefers default
+    });
+  });
+
+  describe("agentLoop", () => {
+    it("should return immediately when no tool calls", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockOk(makeChatResponse("I found the answer."))));
 
       const result = await client.agentLoop(
         [{ role: "user", content: "What is 2+2?" }],
@@ -162,21 +253,13 @@ describe("LLMClient", () => {
       vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
         callIndex++;
         if (callIndex === 1) {
-          // LLM calls a tool
-          return Promise.resolve({
-            ok: true,
-            json: () => Promise.resolve(makeChatResponse(null, [{
-              id: "call-1",
-              type: "function",
-              function: { name: "findSkill", arguments: '{"query":"lint code"}' },
-            }], "tool_calls")),
-          });
+          return Promise.resolve(mockOk(makeChatResponse(null, [{
+            id: "call-1",
+            type: "function",
+            function: { name: "findSkill", arguments: '{"query":"lint code"}' },
+          }], "tool_calls")));
         }
-        // LLM responds after tool result
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve(makeChatResponse("Found a linting skill.")),
-        });
+        return Promise.resolve(mockOk(makeChatResponse("Found a linting skill.")));
       }));
 
       const toolExecutor = vi.fn().mockResolvedValue({ results: ["lint-tool"] });
@@ -205,27 +288,18 @@ describe("LLMClient", () => {
       vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
         callIndex++;
         if (callIndex === 1) {
-          return Promise.resolve({
-            ok: true,
-            json: () => Promise.resolve(makeChatResponse(null, [{
-              id: "call-1", type: "function",
-              function: { name: "findSkill", arguments: '{"query":"audit"}' },
-            }], "tool_calls")),
-          });
+          return Promise.resolve(mockOk(makeChatResponse(null, [{
+            id: "call-1", type: "function",
+            function: { name: "findSkill", arguments: '{"query":"audit"}' },
+          }], "tool_calls")));
         }
         if (callIndex === 2) {
-          return Promise.resolve({
-            ok: true,
-            json: () => Promise.resolve(makeChatResponse(null, [{
-              id: "call-2", type: "function",
-              function: { name: "buildPlan", arguments: '{"steps":[]}' },
-            }], "tool_calls")),
-          });
+          return Promise.resolve(mockOk(makeChatResponse(null, [{
+            id: "call-2", type: "function",
+            function: { name: "buildPlan", arguments: '{"steps":[]}' },
+          }], "tool_calls")));
         }
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve(makeChatResponse("Plan ready.")),
-        });
+        return Promise.resolve(mockOk(makeChatResponse("Plan ready.")));
       }));
 
       const result = await client.agentLoop(
@@ -239,14 +313,10 @@ describe("LLMClient", () => {
     });
 
     it("should respect maxTurns limit", async () => {
-      // LLM always calls tools (never stops)
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve(makeChatResponse(null, [{
-          id: "call-x", type: "function",
-          function: { name: "findSkill", arguments: '{"query":"x"}' },
-        }], "tool_calls")),
-      }));
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockOk(makeChatResponse(null, [{
+        id: "call-x", type: "function",
+        function: { name: "findSkill", arguments: '{"query":"x"}' },
+      }], "tool_calls"))));
 
       const result = await client.agentLoop(
         [{ role: "user", content: "loop" }],
@@ -264,18 +334,12 @@ describe("LLMClient", () => {
       vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
         callIndex++;
         if (callIndex === 1) {
-          return Promise.resolve({
-            ok: true,
-            json: () => Promise.resolve(makeChatResponse(null, [{
-              id: "call-1", type: "function",
-              function: { name: "failingTool", arguments: '{}' },
-            }], "tool_calls")),
-          });
+          return Promise.resolve(mockOk(makeChatResponse(null, [{
+            id: "call-1", type: "function",
+            function: { name: "failingTool", arguments: '{}' },
+          }], "tool_calls")));
         }
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve(makeChatResponse("Handled the error.")),
-        });
+        return Promise.resolve(mockOk(makeChatResponse("Handled the error.")));
       }));
 
       const result = await client.agentLoop(
