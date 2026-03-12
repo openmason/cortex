@@ -1,4 +1,6 @@
 import type { Env, SSEEvent } from "../types";
+import type { Logger } from "../observability/logger";
+import type { Metrics } from "../observability/metrics";
 
 // ---------------------------------------------------------------------------
 // LLM Proxy Client — OpenAI-compatible chat completions via llmproxy.xus.one
@@ -101,17 +103,24 @@ export class LLMClient {
   private baseUrl: string;
   private apiKey: string;
   private model: string;
+  private log?: Logger;
+  private metrics?: Metrics;
 
-  constructor(env: Env) {
+  constructor(env: Env, log?: Logger, metrics?: Metrics) {
     this.baseUrl = env.LLMPROXY_URL;
     this.apiKey = env.LLMPROXY_API_KEY;
     this.model = env.LLM_MODEL;
+    this.log = log;
+    this.metrics = metrics;
   }
 
   /**
    * Send a chat completion request to the LLM proxy.
    */
   async chat(request: Omit<ChatCompletionRequest, "model"> & { model?: string }): Promise<ChatCompletionResponse> {
+    const model = request.model ?? this.model;
+    const start = Date.now();
+
     const res = await fetch(`${this.baseUrl}/v1/chat/completions`, {
       method: "POST",
       headers: {
@@ -120,16 +129,31 @@ export class LLMClient {
       },
       body: JSON.stringify({
         ...request,
-        model: request.model ?? this.model,
+        model,
       }),
     });
 
     if (!res.ok) {
       const text = await res.text();
+      const durationMs = Date.now() - start;
+      this.log?.warn("LLM chat failed", { model, status: res.status, durationMs });
+      this.metrics?.write("llm_call", { status: "error", durationMs, error: `${res.status}` });
       throw new Error(`LLM proxy request failed: ${res.status} ${text}`);
     }
 
-    return res.json();
+    const response: ChatCompletionResponse = await res.json();
+    const durationMs = Date.now() - start;
+    const tokens = response.usage?.total_tokens ?? 0;
+
+    this.log?.debug("LLM chat completed", {
+      model: response.model,
+      durationMs,
+      tokens,
+      finishReason: response.choices[0]?.finish_reason,
+    });
+    this.metrics?.write("llm_call", { status: "ok", durationMs, tokens });
+
+    return response;
   }
 
   /**
@@ -178,6 +202,7 @@ export class LLMClient {
       } catch (err) {
         // If a non-default model was requested and it failed, retry with default
         if (options.model && options.model !== this.model) {
+          this.log?.warn("Model fallback", { failedModel: options.model, fallbackModel: this.model });
           response = await this.chat({
             messages: allMessages,
             tools,

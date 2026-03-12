@@ -1,6 +1,7 @@
 import { createMiddleware } from "hono/factory";
 import type { Env, AppVariables, ApiKeyData } from "../types";
 import { WorkflowRepository } from "../db/repository";
+import { Metrics } from "../observability/metrics";
 
 const API_KEY_CACHE_TTL = 300; // 5 minutes
 
@@ -124,4 +125,37 @@ export const rateLimitMiddleware = createMiddleware<{
   }
 
   await next();
+});
+
+/**
+ * Per-API-key usage tracking via Analytics Engine.
+ *
+ * Fires an `api_usage` metric after each authenticated request completes.
+ * Tracks: tenantId, requestId, product, API key prefix, HTTP status, endpoint.
+ *
+ * Apply AFTER authMiddleware so tenant context is available.
+ */
+export const usageTrackingMiddleware = createMiddleware<{
+  Bindings: Env;
+  Variables: AppVariables;
+}>(async (c, next) => {
+  const start = Date.now();
+
+  await next();
+
+  // Fire-and-forget usage metric after the response is sent
+  const metrics = new Metrics(c.env.ANALYTICS);
+  const key = c.req.header("Authorization")?.slice(7) ?? "";
+  // Store first 8 chars of key as identifier (enough to distinguish, not enough to auth)
+  const keyPrefix = key.slice(0, 8);
+
+  metrics.write("api_usage", {
+    requestId: c.get("requestId"),
+    tenantId: c.get("tenantId"),
+    product: c.get("product"),
+    skillSlug: keyPrefix,  // blob4: repurposed as key prefix for api_usage events
+    status: String(c.res.status),
+    error: c.res.status >= 400 ? new URL(c.req.url).pathname : "",  // blob6: endpoint on error
+    durationMs: Date.now() - start,
+  });
 });

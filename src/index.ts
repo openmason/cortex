@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import type { Env, AppVariables } from "./types";
-import { authMiddleware, rateLimitMiddleware } from "./middleware/auth";
+import { authMiddleware, rateLimitMiddleware, usageTrackingMiddleware } from "./middleware/auth";
 import runRoutes from "./routes/run";
 import healthRoutes from "./routes/health";
 import adminRoutes from "./routes/admin";
@@ -46,6 +46,7 @@ app.use("*", async (c, next) => {
 });
 
 app.use("/v1/*", authMiddleware);
+app.use("/v1/*", usageTrackingMiddleware);
 app.use("/v1/run", rateLimitMiddleware);
 app.use("/v1/run/*", rateLimitMiddleware);
 

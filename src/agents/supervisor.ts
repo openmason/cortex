@@ -44,7 +44,7 @@ export class SupervisorAgent {
 
   constructor(private env: Env, log?: Logger, metrics?: Metrics) {
     this.runics = new RunicsClient(env);
-    this.llm = new LLMClient(env);
+    this.llm = new LLMClient(env, log?.child({ module: "llm" }), metrics);
     this.engine = new WorkflowEngine(env, this.llm, log?.child({ module: "engine" }), metrics);
     this.policyEngine = new PolicyEngine(env);
     this.conversations = new ConversationManager(env);
