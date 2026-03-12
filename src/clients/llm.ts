@@ -274,6 +274,49 @@ export class LLMClient {
   }
 
   /**
+   * Check if finish_reason indicates the model wants to call tools.
+   * Handles provider variants: "tool_calls" (OpenAI), "tool_call" (singular), "function_call" (legacy).
+   * Proxy normalizes to "tool_calls" but we accept variants as a safety net.
+   */
+  private isToolCallFinishReason(reason: string): boolean {
+    return reason === "tool_calls" || reason === "tool_call" || reason === "function_call";
+  }
+
+  /**
+   * Validate and normalize a tool call from the LLM response.
+   * Returns null if the tool call is malformed (logged as warning).
+   */
+  private validateToolCall(toolCall: ToolCall, turn: number): ToolCall | null {
+    if (!toolCall.id) {
+      this.log?.warn("Skipping tool call with missing id", { turn, name: toolCall.function?.name });
+      return null;
+    }
+
+    if (!toolCall.function?.name) {
+      this.log?.warn("Skipping tool call with missing function name", { turn, id: toolCall.id });
+      return null;
+    }
+
+    // Normalize arguments: some providers return an object instead of a JSON string
+    let args = toolCall.function.arguments;
+    if (typeof args !== "string") {
+      try {
+        args = JSON.stringify(args);
+        this.log?.debug("Normalized tool call arguments from object to string", { turn, name: toolCall.function.name });
+      } catch {
+        this.log?.warn("Skipping tool call with un-serializable arguments", { turn, name: toolCall.function.name });
+        return null;
+      }
+    }
+
+    return {
+      id: toolCall.id,
+      type: "function",
+      function: { name: toolCall.function.name, arguments: args },
+    };
+  }
+
+  /**
    * Run a multi-turn agentic loop: send messages, process tool calls,
    * feed results back, repeat until the model stops calling tools.
    */
@@ -302,19 +345,39 @@ export class LLMClient {
         throw new Error("LLM proxy returned no choices");
       }
 
-      // Add the assistant message (proxy v0.5.2+ accepts content:null natively)
+      // Add the assistant message (proxy normalizes content:null → "" on input)
       allMessages.push(choice.message);
 
       // If the model didn't call any tools, we're done
-      if (choice.finish_reason !== "tool_calls" || !choice.message.tool_calls?.length) {
+      const hasToolCalls = this.isToolCallFinishReason(choice.finish_reason) && choice.message.tool_calls?.length;
+      if (!hasToolCalls) {
+        this.log?.debug("Agent loop completed", { turn, totalMessages: allMessages.length });
         return {
           messages: allMessages,
           finalContent: choice.message.content ?? "",
         };
       }
 
-      // Execute each tool call and add results
-      for (const toolCall of choice.message.tool_calls) {
+      // Validate and execute each tool call
+      const validToolCalls = choice.message.tool_calls
+        .map((tc) => this.validateToolCall(tc, turn))
+        .filter((tc): tc is ToolCall => tc !== null);
+
+      if (validToolCalls.length === 0) {
+        this.log?.warn("All tool calls in turn were malformed, ending loop", { turn });
+        return {
+          messages: allMessages,
+          finalContent: choice.message.content ?? "",
+        };
+      }
+
+      this.log?.debug("Processing tool calls", {
+        turn,
+        tools: validToolCalls.map((tc) => tc.function.name),
+        messageCount: allMessages.length,
+      });
+
+      for (const toolCall of validToolCalls) {
         await options.onEvent?.({
           event: "tool_call",
           data: { name: toolCall.function.name, arguments: toolCall.function.arguments, turn },
@@ -343,6 +406,7 @@ export class LLMClient {
     }
 
     // If we hit maxTurns, return what we have
+    this.log?.warn("Agent loop hit maxTurns", { maxTurns, totalMessages: allMessages.length });
     const lastAssistant = allMessages.filter((m) => m.role === "assistant").pop();
     return {
       messages: allMessages,

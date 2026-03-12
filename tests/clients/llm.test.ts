@@ -329,6 +329,140 @@ describe("LLMClient", () => {
       expect(fetch).toHaveBeenCalledTimes(3);
     });
 
+    it("should accept 'tool_call' (singular) finish_reason as safety net", async () => {
+      let callIndex = 0;
+      vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
+        callIndex++;
+        if (callIndex === 1) {
+          return Promise.resolve(mockOk(makeChatResponse(null, [{
+            id: "call-1", type: "function",
+            function: { name: "findSkill", arguments: '{"query":"test"}' },
+          }], "tool_call"))); // singular — some providers do this
+        }
+        return Promise.resolve(mockOk(makeChatResponse("Done.")));
+      }));
+
+      const result = await client.agentLoop(
+        [{ role: "user", content: "test" }],
+        [],
+        async () => ({ ok: true }),
+      );
+
+      expect(result.finalContent).toBe("Done.");
+      expect(callIndex).toBe(2); // processed the tool call despite singular finish_reason
+    });
+
+    it("should accept 'function_call' finish_reason as safety net", async () => {
+      let callIndex = 0;
+      vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
+        callIndex++;
+        if (callIndex === 1) {
+          return Promise.resolve(mockOk(makeChatResponse(null, [{
+            id: "call-1", type: "function",
+            function: { name: "findSkill", arguments: '{"query":"test"}' },
+          }], "function_call"))); // legacy format
+        }
+        return Promise.resolve(mockOk(makeChatResponse("Done.")));
+      }));
+
+      const result = await client.agentLoop(
+        [{ role: "user", content: "test" }],
+        [],
+        async () => ({ ok: true }),
+      );
+
+      expect(result.finalContent).toBe("Done.");
+      expect(callIndex).toBe(2);
+    });
+
+    it("should skip tool calls with missing id", async () => {
+      let callIndex = 0;
+      vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
+        callIndex++;
+        if (callIndex === 1) {
+          return Promise.resolve(mockOk(makeChatResponse(null, [
+            { id: "", type: "function", function: { name: "badTool", arguments: '{}' } }, // empty id
+            { id: "call-good", type: "function", function: { name: "goodTool", arguments: '{}' } },
+          ], "tool_calls")));
+        }
+        return Promise.resolve(mockOk(makeChatResponse("Done.")));
+      }));
+
+      const executor = vi.fn().mockResolvedValue({ ok: true });
+      await client.agentLoop(
+        [{ role: "user", content: "test" }],
+        [],
+        executor,
+      );
+
+      // Only goodTool should have been executed (badTool skipped due to empty id)
+      expect(executor).toHaveBeenCalledTimes(1);
+      expect(executor).toHaveBeenCalledWith("goodTool", {});
+    });
+
+    it("should skip tool calls with missing function name", async () => {
+      let callIndex = 0;
+      vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
+        callIndex++;
+        if (callIndex === 1) {
+          return Promise.resolve(mockOk(makeChatResponse(null, [
+            { id: "call-1", type: "function", function: { name: "", arguments: '{}' } }, // empty name
+            { id: "call-2", type: "function", function: { name: "goodTool", arguments: '{}' } },
+          ], "tool_calls")));
+        }
+        return Promise.resolve(mockOk(makeChatResponse("Done.")));
+      }));
+
+      const executor = vi.fn().mockResolvedValue({ ok: true });
+      await client.agentLoop(
+        [{ role: "user", content: "test" }],
+        [],
+        executor,
+      );
+
+      expect(executor).toHaveBeenCalledTimes(1);
+      expect(executor).toHaveBeenCalledWith("goodTool", {});
+    });
+
+    it("should normalize arguments from object to JSON string", async () => {
+      let callIndex = 0;
+      vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
+        callIndex++;
+        if (callIndex === 1) {
+          return Promise.resolve(mockOk(makeChatResponse(null, [{
+            id: "call-1", type: "function",
+            function: { name: "findSkill", arguments: { query: "test" } as any }, // object instead of string
+          }], "tool_calls")));
+        }
+        return Promise.resolve(mockOk(makeChatResponse("Done.")));
+      }));
+
+      const executor = vi.fn().mockResolvedValue({ ok: true });
+      await client.agentLoop(
+        [{ role: "user", content: "test" }],
+        [],
+        executor,
+      );
+
+      expect(executor).toHaveBeenCalledWith("findSkill", { query: "test" });
+    });
+
+    it("should end loop when all tool calls in a turn are malformed", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockOk(makeChatResponse("fallback content", [{
+        id: "", type: "function", function: { name: "", arguments: '{}' }, // both invalid
+      }], "tool_calls"))));
+
+      const executor = vi.fn();
+      const result = await client.agentLoop(
+        [{ role: "user", content: "test" }],
+        [],
+        executor,
+      );
+
+      expect(executor).not.toHaveBeenCalled();
+      expect(result.finalContent).toBe("fallback content");
+    });
+
     it("should handle tool execution errors gracefully", async () => {
       let callIndex = 0;
       vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {

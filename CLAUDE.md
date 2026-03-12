@@ -36,9 +36,11 @@ Runics (registry) ──→ Cognium (internal trust/scanning)
 - Default model (`LLM_MODEL`): `cognium/claude-sonnet-latest`
 - Tool call model (`TOOL_CALL_MODEL`): configurable separately. Currently `cognium/claude-sonnet-latest`. `gpt-oss-120b` was tested but returns Workers AI 500 errors.
 - **Model selection**: `getToolCallModel()` queries proxy capabilities (KV-cached 5 min), selects best tool-capable model. `TOOL_CALL_MODEL` env var is an optional override.
-- **Model fallback**: `agentLoop` in `src/clients/llm.ts` retries with the default model if the preferred model fails.
-- **OpenRouter compat**: Handled at the proxy layer (v0.5.2+) — response normalization, input message normalization, `content:null` support. All models work for multi-turn tool calling.
+- **Model fallback**: Proxy handles model-level fallback chains (e.g. claude-sonnet → gemini-pro on 402). No client-side retry in `agentLoop`.
+- **OpenRouter compat**: Handled at the proxy layer (v0.5.2+) — response normalization, input message normalization, `content:null` → `""` conversion. All models work for multi-turn tool calling.
+- **Multi-turn tool calling**: `agentLoop` validates tool call structure (id, function name, arguments format), accepts `finish_reason` variants (`tool_calls`, `tool_call`, `function_call`) as safety net, normalizes arguments from object→string if provider returns non-string, skips malformed tool calls gracefully.
 - **Request correlation**: Sends `X-Request-ID` on outgoing proxy calls, reads `X-Proxy-Request-ID` from responses.
+- **Cost tracking**: `usage.cost` from proxy responses written to Analytics Engine `double3` and logged per LLM call.
 - Models constant in `src/clients/llm.ts` MODELS object (11 models: 3 premium, 3 budget, 3 specialized, 2 Cloudflare)
 
 ## Infrastructure (Provisioned)
