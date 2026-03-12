@@ -97,8 +97,10 @@ export const MODELS = {
 
   // Specialized
   GEMINI_PRO: "cognium/gemini-pro-latest",
+  Z_AI: "cognium/z-ai-latest",
+  MINIMAX: "cognium/minimax-m-latest",
 
-  // Cloudflare
+  // Cloudflare (no tool calling)
   GPT_OSS_120B: "cognium/gpt-oss-120b",
   QWEN_CODER: "cognium/qwen-2.5-coder",
 } as const;

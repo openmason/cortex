@@ -35,9 +35,11 @@ Runics (registry) ──→ Cognium (internal trust/scanning)
 - API Key: set as `LLMPROXY_API_KEY` secret
 - Default model (`LLM_MODEL`): `cognium/claude-sonnet-latest`
 - Tool call model (`TOOL_CALL_MODEL`): configurable separately. Currently `cognium/claude-sonnet-latest`. `gpt-oss-120b` was tested but returns Workers AI 500 errors.
-- **Model fallback**: `agentLoop` in `src/clients/llm.ts` retries with the default model if the preferred model (e.g. `TOOL_CALL_MODEL`) fails.
-- **OpenRouter compat**: Handled at the proxy layer (v0.5.2) — response normalization + input message normalization. All models work for multi-turn tool calling.
-- Models constant in `src/clients/llm.ts` MODELS object
+- **Model selection**: `getToolCallModel()` queries proxy capabilities (KV-cached 5 min), selects best tool-capable model. `TOOL_CALL_MODEL` env var is an optional override.
+- **Model fallback**: `agentLoop` in `src/clients/llm.ts` retries with the default model if the preferred model fails.
+- **OpenRouter compat**: Handled at the proxy layer (v0.5.2+) — response normalization, input message normalization, `content:null` support. All models work for multi-turn tool calling.
+- **Request correlation**: Sends `X-Request-ID` on outgoing proxy calls, reads `X-Proxy-Request-ID` from responses.
+- Models constant in `src/clients/llm.ts` MODELS object (11 models: 3 premium, 3 budget, 3 specialized, 2 Cloudflare)
 
 ## Infrastructure (Provisioned)
 - **Neon DB**: Connection string in `.dev.vars` / wrangler secret `DATABASE_URL`
@@ -149,7 +151,7 @@ When a skill has no executable bundle (no `mcpUrl`, no `skillMd`, no `r2BundleKe
 - Backward compat: old states without `timeoutAt` are never lazily timed out
 
 ## Testing
-- 396 unit tests passing across 25 test files (`npx vitest run`)
+- 401 unit tests passing across 25 test files (`npx vitest run`)
 - Local dev tested with `npx wrangler dev` — health, models, and full run request all work
 - E2E verified live: codegen pipeline working end-to-end (findSkill → invokeSkill → codegen → Daytona → result)
 - E2E smoke test: `ADMIN_SECRET=<secret> npx tsx scripts/smoke-test.ts` (9 tests against live deployment)
@@ -190,7 +192,8 @@ Master specification: `cortex-specification.md`
 
 ## Known Issues
 - **KV free-tier daily write limit** — `WORKFLOW_STATE` KV still hits the daily write cap for workflow state writes and health checks. API keys are now in Neon DB (resolved). Health check uses read-only KV check to avoid burning writes. Rate limiter and auth backfill KV writes are non-blocking (`waitUntil` + `try/catch`).
-- **gpt-oss-120b unreliable** — Workers AI model returns internal server errors (500). `TOOL_CALL_MODEL` is set to `claude-sonnet-latest` as a workaround. Model fallback in `agentLoop` handles failures gracefully.
+- **gpt-oss-120b / qwen-2.5-coder no tool calling** — Workers AI models confirmed `supports_tool_calls: false` by proxy capabilities. `getToolCallModel()` automatically skips them.
+- **OpenRouter credits exhausted** — `cognium/claude-sonnet-latest` and fallbacks return 402. Need to top up via https://openrouter.ai/settings/credits
 
 ## Decoupling Status (Completed)
 Cognium and Forge queue integrations have been removed. What remains:
@@ -205,10 +208,12 @@ Cognium and Forge queue integrations have been removed. What remains:
 - **Analytics Engine dataset**: `cortex_metrics` (binding: `ANALYTICS`) — index: tenantId, blobs: [event, requestId, product, skillSlug, status, error], doubles: [durationMs, tokens]
 - **Request ID**: `X-Request-ID` header propagated/generated on every request, threaded through Logger context
 - **Constructor chain**: Logger + Metrics created per-request in route handlers, passed through Supervisor → Engine → Router → Repository via optional constructor params
-- **Instrumentation points**: request (run handler), skill_exec (router), codegen (router), workflow (engine), cron (index.ts)
+- **Instrumentation points**: request (run handler), skill_exec (router), codegen (router), llm_call (LLMClient), api_usage (auth middleware), workflow (engine), cron (index.ts)
+- **Per-API-key tracking**: `usageTrackingMiddleware` fires `api_usage` event after every `/v1/*` request with key prefix (first 8 chars), HTTP status, endpoint (on error), latency
 
 ## Next Steps (Prioritized)
-1. Webhook/callback support for long-running workflows
-2. Per-API-key usage tracking and billing metering
-3. E2E test for buildPlan multi-step workflow path (live, not just unit tests)
-4. LLM call metrics — instrument LLMClient with Logger/Metrics
+1. Enable Analytics Engine on Cloudflare dashboard, uncomment binding in `wrangler.toml`, redeploy
+2. Top up OpenRouter credits (currently 402 — insufficient credits)
+3. Webhook/callback support for long-running workflows
+4. E2E test for buildPlan multi-step workflow path (live, not just unit tests)
+5. Production CORS lockdown (currently allows all origins)
