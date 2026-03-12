@@ -72,6 +72,18 @@ describe("Metrics", () => {
     expect(call.blobs[3]).toBe("test-skill");
     expect(call.blobs[4]).toBe(""); // status
     expect(call.blobs[5]).toBe(""); // error
-    expect(call.doubles).toEqual([0, 0]);
+    expect(call.doubles).toEqual([0, 0, 0]);
+  });
+
+  it("records cost in double3", () => {
+    const mockAnalytics = {
+      writeDataPoint: vi.fn(),
+    };
+
+    const metrics = new Metrics(mockAnalytics as unknown as AnalyticsEngineDataset);
+    metrics.write("llm_call", { tenantId: "t1", durationMs: 200, tokens: 500, cost: 0.00059 });
+
+    const call = mockAnalytics.writeDataPoint.mock.calls[0][0];
+    expect(call.doubles).toEqual([200, 500, 0.00059]);
   });
 });

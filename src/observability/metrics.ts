@@ -14,6 +14,7 @@
  *   blob6:   error message
  *   double1: durationMs
  *   double2: tokens
+ *   double3: cost (USD, from proxy usage.cost)
  */
 
 export interface MetricContext {
@@ -25,6 +26,7 @@ export interface MetricContext {
   error?: string;
   durationMs?: number;
   tokens?: number;
+  cost?: number;
 }
 
 export class Metrics {
@@ -44,7 +46,7 @@ export class Metrics {
           ctx.status ?? "",
           ctx.error ?? "",
         ],
-        doubles: [ctx.durationMs ?? 0, ctx.tokens ?? 0],
+        doubles: [ctx.durationMs ?? 0, ctx.tokens ?? 0, ctx.cost ?? 0],
       });
     } catch {
       // Fire-and-forget — never block the request

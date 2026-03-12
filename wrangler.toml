@@ -44,8 +44,9 @@ service = "runics"
 [ai]
 binding = "AI"
 
-# --- Analytics Engine (enable at dashboard first, then uncomment) ---
-# https://dash.cloudflare.com/1f59f4dcd0ebb559e3c392566978d446/workers/analytics-engine
+# --- Analytics Engine ---
+# Enable via: https://dash.cloudflare.com/1f59f4dcd0ebb559e3c392566978d446/workers/analytics-engine
+# Then uncomment:
 # [[analytics_engine_datasets]]
 # binding = "ANALYTICS"
 # dataset = "cortex_metrics"

@@ -55,6 +55,7 @@ export interface ChatCompletionResponse {
     prompt_tokens: number;
     completion_tokens: number;
     total_tokens: number;
+    cost?: number;
   };
 }
 
@@ -170,10 +171,11 @@ export class LLMClient {
       model: response.model,
       durationMs,
       tokens,
+      cost: response.usage.cost,
       finishReason: response.choices[0]?.finish_reason,
       proxyReqId,
     });
-    this.metrics?.write("llm_call", { status: "ok", durationMs, tokens });
+    this.metrics?.write("llm_call", { status: "ok", durationMs, tokens, cost: response.usage.cost });
 
     return response;
   }
@@ -285,31 +287,15 @@ export class LLMClient {
     const allMessages = [...messages];
 
     for (let turn = 0; turn < maxTurns; turn++) {
-      let response: ChatCompletionResponse;
-      try {
-        response = await this.chat({
-          model: options.model,
-          messages: allMessages,
-          tools,
-          tool_choice: "auto",
-          temperature: options.temperature ?? 0.2,
-          max_tokens: options.maxTokens ?? 4096,
-        });
-      } catch (err) {
-        // If a non-default model was requested and it failed, retry with default
-        if (options.model && options.model !== this.model) {
-          this.log?.warn("Model fallback", { failedModel: options.model, fallbackModel: this.model });
-          response = await this.chat({
-            messages: allMessages,
-            tools,
-            tool_choice: "auto",
-            temperature: options.temperature ?? 0.2,
-            max_tokens: options.maxTokens ?? 4096,
-          });
-        } else {
-          throw err;
-        }
-      }
+      // Proxy handles model-level fallback chains — no client-side retry needed
+      const response = await this.chat({
+        model: options.model,
+        messages: allMessages,
+        tools,
+        tool_choice: "auto",
+        temperature: options.temperature ?? 0.2,
+        max_tokens: options.maxTokens ?? 4096,
+      });
 
       const choice = response.choices[0];
       if (!choice) {

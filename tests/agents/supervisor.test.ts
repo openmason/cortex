@@ -132,6 +132,155 @@ describe("SupervisorAgent", () => {
       expect(response.summary).toContain("review");
     });
 
+    it("should build multi-step plan when composition is detected", async () => {
+      let fetchCount = 0;
+      vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
+        fetchCount++;
+        if (fetchCount === 1) {
+          // Runics search response with composition detected
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({
+              results: [
+                {
+                  id: "skill-1",
+                  slug: "cargo-audit",
+                  version: "1.0.0",
+                  name: "Cargo Audit",
+                  executionLayer: "mcp-remote",
+                  mcpUrl: "https://mcp.example.com",
+                  trustScore: 0.89,
+                  verificationTier: "verified",
+                  trustBadge: "upstream",
+                  status: "published",
+                  skillType: "atomic",
+                  runCount: 47,
+                },
+                {
+                  id: "skill-2",
+                  slug: "cargo-clippy",
+                  version: "1.0.0",
+                  name: "Cargo Clippy",
+                  executionLayer: "mcp-remote",
+                  mcpUrl: "https://mcp.example.com",
+                  trustScore: 0.91,
+                  verificationTier: "verified",
+                  trustBadge: "upstream",
+                  status: "published",
+                  skillType: "atomic",
+                  runCount: 100,
+                },
+              ],
+              confidence: "high",
+              enriched: false,
+              composition: { detected: true, parts: ["audit", "lint"] },
+              meta: { latencyMs: 55, tier: 2, cacheHit: false, llmInvoked: true },
+            }),
+          });
+        }
+        // MCP execution calls — both steps succeed
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ result: { output: `step-${fetchCount} ok` } }),
+        });
+      }));
+
+      const request: RunRequest = {
+        prompt: "audit and lint my rust project",
+        tenantId: "t1",
+        userId: "u1",
+        product: "bombastic",
+      };
+
+      const response = await supervisor.handleRequestDirect(request, ctx);
+
+      expect(response.status).toBe("completed");
+      expect(response.plan).toBeDefined();
+      expect(response.plan!.steps.length).toBe(2);
+      expect(response.plan!.steps[0].skill.slug).toBe("cargo-audit");
+      expect(response.plan!.steps[1].skill.slug).toBe("cargo-clippy");
+      // Both steps should have completed
+      expect(response.plan!.steps.every((s) => s.status === "completed")).toBe(true);
+      expect(response.result).toBeDefined();
+    });
+
+    it("should handle step failure with onError=fail in multi-step plan", async () => {
+      let fetchCount = 0;
+      vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
+        fetchCount++;
+        if (fetchCount === 1) {
+          // Runics search — composition with 2 skills
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({
+              results: [
+                {
+                  id: "skill-1",
+                  slug: "cargo-build",
+                  version: "1.0.0",
+                  name: "Cargo Build",
+                  executionLayer: "mcp-remote",
+                  mcpUrl: "https://mcp.example.com",
+                  trustScore: 0.85,
+                  verificationTier: "verified",
+                  trustBadge: null,
+                  status: "published",
+                  skillType: "atomic",
+                  runCount: 30,
+                },
+                {
+                  id: "skill-2",
+                  slug: "cargo-test",
+                  version: "1.0.0",
+                  name: "Cargo Test",
+                  executionLayer: "mcp-remote",
+                  mcpUrl: "https://mcp.example.com",
+                  trustScore: 0.88,
+                  verificationTier: "verified",
+                  trustBadge: null,
+                  status: "published",
+                  skillType: "atomic",
+                  runCount: 50,
+                },
+              ],
+              confidence: "high",
+              enriched: false,
+              composition: { detected: true, parts: ["build", "test"] },
+              meta: { latencyMs: 40, tier: 2, cacheHit: false, llmInvoked: true },
+            }),
+          });
+        }
+        // First MCP call succeeds, second fails
+        if (fetchCount === 2) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ result: { output: "build ok" } }),
+          });
+        }
+        // Step 2 execution fails
+        return Promise.resolve({
+          ok: false,
+          status: 500,
+          text: () => Promise.resolve("Internal Server Error"),
+        });
+      }));
+
+      const request: RunRequest = {
+        prompt: "build and test my rust project",
+        tenantId: "t1",
+        userId: "u1",
+        product: "bombastic",
+      };
+
+      const response = await supervisor.handleRequestDirect(request, ctx);
+
+      expect(response.status).toBe("failed");
+      expect(response.plan).toBeDefined();
+      expect(response.plan!.steps.length).toBe(2);
+      expect(response.plan!.steps[0].status).toBe("completed");
+      expect(response.plan!.steps[1].status).toBe("failed");
+    });
+
     it("should execute immediately for bombastic (full_auto)", async () => {
       let fetchCount = 0;
       vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
