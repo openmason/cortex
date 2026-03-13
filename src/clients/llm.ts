@@ -213,6 +213,19 @@ export class LLMClient {
   }
 
   /**
+   * Check if any tool-capable model is available from the proxy.
+   * Returns true if at least one model has supports_tool_calls === true.
+   */
+  async hasToolCapableModel(): Promise<boolean> {
+    try {
+      const models = await this.getCachedModels();
+      return models.some((m) => m.supports_tool_calls === true);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Resolve the best model for tool calling.
    *
    * Priority:

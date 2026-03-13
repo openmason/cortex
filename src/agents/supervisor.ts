@@ -62,6 +62,13 @@ export class SupervisorAgent {
     request: RunRequest,
     executionCtx: ExecutionContext,
   ): Promise<RunResponse> {
+    // Check if tool calling is available; if not, fall back to direct (Runics search) mode
+    const hasToolCalling = await this.llm.hasToolCapableModel();
+    if (!hasToolCalling) {
+      this.log?.info("No tool-capable model available, using direct mode");
+      return this.handleRequestDirect(request, executionCtx);
+    }
+
     const config = getProductConfig(request.product);
 
     const tenant: TenantContext = {
@@ -281,6 +288,15 @@ export class SupervisorAgent {
     executionCtx: ExecutionContext,
     onEvent: (event: SSEEvent) => void | Promise<void>,
   ): Promise<RunResponse> {
+    // Check if tool calling is available; if not, fall back to direct mode
+    const hasToolCalling = await this.llm.hasToolCapableModel();
+    if (!hasToolCalling) {
+      this.log?.info("No tool-capable model available, using direct mode (streaming)");
+      const result = await this.handleRequestDirect(request, executionCtx);
+      await onEvent({ event: "done", data: { workflowId: result.workflowId, status: result.status, summary: result.summary } });
+      return result;
+    }
+
     const config = getProductConfig(request.product);
 
     const tenant: TenantContext = {

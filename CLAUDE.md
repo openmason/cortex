@@ -33,9 +33,10 @@ Runics (registry) ──→ Cognium (internal trust/scanning)
 ## LLM Proxy
 - URL: `https://llmproxy.xus.one` (OpenAI-compatible, routed via LiteLLM → OpenRouter / Cloudflare Workers AI)
 - API Key: set as `LLMPROXY_API_KEY` secret
-- Default model (`LLM_MODEL`): `cognium/claude-sonnet-latest`
-- Tool call model (`TOOL_CALL_MODEL`): configurable separately. Currently `cognium/claude-sonnet-latest`. `gpt-oss-120b` was tested but returns Workers AI 500 errors.
+- Default model (`LLM_MODEL`): `cognium/gpt-oss-120b` (free, Cloudflare Workers AI)
+- Tool call model (`TOOL_CALL_MODEL`): `cognium/gpt-oss-120b` (note: does NOT support tool calling)
 - **Model selection**: `getToolCallModel()` queries proxy capabilities (KV-cached 5 min), selects best tool-capable model. `TOOL_CALL_MODEL` env var is an optional override.
+- **No-tool-call fallback**: `handleRequest` and `handleRequestStreaming` check `hasToolCapableModel()` first. If no tool-capable model is available, they automatically fall back to `handleRequestDirect` (Runics keyword search → execute, no LLM planning loop).
 - **Model fallback**: Proxy handles model-level fallback chains (e.g. claude-sonnet → gemini-pro on 402). No client-side retry in `agentLoop`.
 - **OpenRouter compat**: Handled at the proxy layer (v0.5.2+) — response normalization, input message normalization, `content:null` → `""` conversion. All models work for multi-turn tool calling.
 - **Multi-turn tool calling**: `agentLoop` validates tool call structure (id, function name, arguments format), accepts `finish_reason` variants (`tool_calls`, `tool_call`, `function_call`) as safety net, normalizes arguments from object→string if provider returns non-string, skips malformed tool calls gracefully.
@@ -196,8 +197,8 @@ Master specification: `cortex-specification.md`
 
 ## Known Issues
 - **KV free-tier daily write limit** — `WORKFLOW_STATE` KV still hits the daily write cap for workflow state writes and health checks. API keys are now in Neon DB (resolved). Health check uses read-only KV check to avoid burning writes. Rate limiter and auth backfill KV writes are non-blocking (`waitUntil` + `try/catch`).
-- **gpt-oss-120b / qwen-2.5-coder no tool calling** — Workers AI models confirmed `supports_tool_calls: false` by proxy capabilities. `getToolCallModel()` automatically skips them.
-- **OpenRouter credits exhausted** — `cognium/claude-sonnet-latest` and fallbacks return 402. Need to top up via https://openrouter.ai/settings/credits
+- **gpt-oss-120b / qwen-2.5-coder no tool calling** — Workers AI models confirmed `supports_tool_calls: false` by proxy capabilities. `hasToolCapableModel()` detects this and falls back to `handleRequestDirect` (no agentic planning loop).
+- **OpenRouter models unavailable** — proxy currently only returns Cloudflare Workers AI models. When OpenRouter models are re-added, the agentic loop will automatically activate (via `hasToolCapableModel()` check).
 
 ## Decoupling Status (Completed)
 Cognium and Forge queue integrations have been removed. What remains:
@@ -209,7 +210,7 @@ Cognium and Forge queue integrations have been removed. What remains:
 ## Observability
 - **Structured logging**: `src/observability/logger.ts` — JSON output via console.log/warn/error/debug, child loggers, level filtering (debug < info < warn < error)
 - **Metrics**: `src/observability/metrics.ts` — Cloudflare Analytics Engine `writeDataPoint()`, fire-and-forget, no-op when binding missing
-- **Analytics Engine dataset**: `cortex_metrics` (binding: `ANALYTICS`) — BLOCKED on dashboard enablement (error 10089). Binding commented out in `wrangler.toml`. Code is ready — `Metrics` class no-ops when `ANALYTICS` is undefined. Schema: index: tenantId, blobs: [event, requestId, product, skillSlug, status, error], doubles: [durationMs, tokens, cost]
+- **Analytics Engine dataset**: `cortex_metrics` (binding: `ANALYTICS`, enabled in `wrangler.toml`). Schema: index: tenantId, blobs: [event, requestId, product, skillSlug, status, error], doubles: [durationMs, tokens, cost]
 - **Request ID**: `X-Request-ID` header propagated/generated on every request, threaded through Logger context
 - **Constructor chain**: Logger + Metrics created per-request in route handlers, passed through Supervisor → Engine → Router → Repository via optional constructor params
 - **Instrumentation points**: request (run handler), skill_exec (router), codegen (router), llm_call (LLMClient), api_usage (auth middleware), workflow (engine), cron (index.ts)
@@ -218,9 +219,9 @@ Cognium and Forge queue integrations have been removed. What remains:
 - **RunResponse usage**: `POST /v1/run` returns `usage: { totalTokens, totalCost }` from the agent loop
 
 ## Next Steps (Prioritized)
-1. Enable Analytics Engine on Cloudflare dashboard (binding already in `wrangler.toml`), then redeploy
-2. Top up OpenRouter credits (currently 402 — insufficient credits)
-3. Webhook/callback support for long-running workflows
-4. E2E test for buildPlan multi-step workflow path (live, not just unit tests)
-5. Production CORS lockdown (currently allows all origins)
-6. Token-level streaming (stream LLM tokens to client as they arrive, not just tool events)
+1. Re-add OpenRouter models to proxy (enables agentic loop via `hasToolCapableModel()` auto-detection)
+2. Webhook/callback support for long-running workflows
+3. E2E test for buildPlan multi-step workflow path (live, not just unit tests)
+4. Production CORS lockdown (currently allows all origins)
+5. Token-level streaming (stream LLM tokens to client as they arrive, not just tool events)
+6. Conversation-to-session linking (add `conversationId` to `workflow_sessions` table)

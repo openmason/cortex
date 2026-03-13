@@ -45,12 +45,9 @@ service = "runics"
 binding = "AI"
 
 # --- Analytics Engine ---
-# BLOCKED: error 10089 — enable first at:
-# https://dash.cloudflare.com/1f59f4dcd0ebb559e3c392566978d446/workers/analytics-engine
-# Then uncomment and redeploy:
-# [[analytics_engine_datasets]]
-# binding = "ANALYTICS"
-# dataset = "cortex_metrics"
+[[analytics_engine_datasets]]
+binding = "ANALYTICS"
+dataset = "cortex_metrics"
 
 # --- Environment Variables ---
 [vars]
@@ -59,8 +56,8 @@ RUNICS_URL = "https://runics.phantoms.workers.dev"
 DAYTONA_TARGET = "us"
 DAYTONA_API_URL = "https://app.daytona.io/api"
 LLMPROXY_URL = "https://llmproxy.xus.one"
-LLM_MODEL = "cognium/claude-sonnet-latest"
-TOOL_CALL_MODEL = "cognium/claude-sonnet-latest"
+LLM_MODEL = "cognium/gpt-oss-120b"
+TOOL_CALL_MODEL = "cognium/gpt-oss-120b"
 DEFAULT_EXECUTION_MODE = "review_before_run"
 DEFAULT_APPETITE = "balanced"
 WORKFLOW_TIMEOUT_MS = "300000"
