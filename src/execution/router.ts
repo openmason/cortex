@@ -24,7 +24,7 @@ export class ExecutionRouter {
   private metrics?: Metrics;
 
   constructor(env: Env, llm?: LLMClient, log?: Logger, metrics?: Metrics) {
-    this.daytona = new DaytonaClient(env);
+    this.daytona = new DaytonaClient(env, log?.child({ module: "daytona" }), metrics);
     this.workerDispatch = new WorkerDispatch(env);
     this.llm = llm ?? null;
     this.log = log;

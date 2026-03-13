@@ -406,6 +406,7 @@ export interface RunResponse {
   result?: unknown;
   summary?: string;
   conversationId?: string;
+  usage?: { totalTokens: number; totalCost: number };
 }
 
 export interface ResumeRequest {

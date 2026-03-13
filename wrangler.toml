@@ -45,8 +45,9 @@ service = "runics"
 binding = "AI"
 
 # --- Analytics Engine ---
-# Enable via: https://dash.cloudflare.com/1f59f4dcd0ebb559e3c392566978d446/workers/analytics-engine
-# Then uncomment:
+# BLOCKED: error 10089 — enable first at:
+# https://dash.cloudflare.com/1f59f4dcd0ebb559e3c392566978d446/workers/analytics-engine
+# Then uncomment and redeploy:
 # [[analytics_engine_datasets]]
 # binding = "ANALYTICS"
 # dataset = "cortex_metrics"

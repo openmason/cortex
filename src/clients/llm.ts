@@ -108,6 +108,19 @@ export const MODELS = {
 
 export type ModelAlias = (typeof MODELS)[keyof typeof MODELS];
 
+export interface AgentLoopTurnUsage {
+  turn: number;
+  tokens: number;
+  cost?: number;
+  toolCalls: string[];
+}
+
+export interface AgentLoopUsage {
+  totalTokens: number;
+  totalCost: number;
+  turns: AgentLoopTurnUsage[];
+}
+
 // KV cache key + TTL for model capabilities
 const MODEL_CACHE_KEY = "models:capabilities";
 const MODEL_CACHE_TTL = 300; // 5 minutes
@@ -325,9 +338,10 @@ export class LLMClient {
     tools: ToolDefinition[],
     toolExecutor: (name: string, args: Record<string, unknown>) => Promise<unknown>,
     options: { model?: string; maxTurns?: number; temperature?: number; maxTokens?: number; onEvent?: (event: SSEEvent) => void | Promise<void> } = {},
-  ): Promise<{ messages: ChatMessage[]; finalContent: string }> {
+  ): Promise<{ messages: ChatMessage[]; finalContent: string; usage: AgentLoopUsage }> {
     const maxTurns = options.maxTurns ?? 10;
     const allMessages = [...messages];
+    const usage: AgentLoopUsage = { totalTokens: 0, totalCost: 0, turns: [] };
 
     for (let turn = 0; turn < maxTurns; turn++) {
       // Proxy handles model-level fallback chains — no client-side retry needed
@@ -345,17 +359,21 @@ export class LLMClient {
         throw new Error("LLM proxy returned no choices");
       }
 
+      // Track usage for this turn
+      const turnTokens = response.usage?.total_tokens ?? 0;
+      const turnCost = response.usage?.cost;
+      usage.totalTokens += turnTokens;
+      if (turnCost) usage.totalCost += turnCost;
+
       // Add the assistant message (proxy normalizes content:null → "" on input)
       allMessages.push(choice.message);
 
       // If the model didn't call any tools, we're done
       const hasToolCalls = this.isToolCallFinishReason(choice.finish_reason) && choice.message.tool_calls?.length;
       if (!hasToolCalls) {
+        usage.turns.push({ turn, tokens: turnTokens, cost: turnCost, toolCalls: [] });
         this.log?.debug("Agent loop completed", { turn, totalMessages: allMessages.length });
-        return {
-          messages: allMessages,
-          finalContent: choice.message.content ?? "",
-        };
+        return { messages: allMessages, finalContent: choice.message.content ?? "", usage };
       }
 
       // Validate and execute each tool call
@@ -364,16 +382,17 @@ export class LLMClient {
         .filter((tc): tc is ToolCall => tc !== null);
 
       if (validToolCalls.length === 0) {
+        usage.turns.push({ turn, tokens: turnTokens, cost: turnCost, toolCalls: [] });
         this.log?.warn("All tool calls in turn were malformed, ending loop", { turn });
-        return {
-          messages: allMessages,
-          finalContent: choice.message.content ?? "",
-        };
+        return { messages: allMessages, finalContent: choice.message.content ?? "", usage };
       }
+
+      const toolCallNames = validToolCalls.map((tc) => tc.function.name);
+      usage.turns.push({ turn, tokens: turnTokens, cost: turnCost, toolCalls: toolCallNames });
 
       this.log?.debug("Processing tool calls", {
         turn,
-        tools: validToolCalls.map((tc) => tc.function.name),
+        tools: toolCallNames,
         messageCount: allMessages.length,
       });
 
@@ -408,9 +427,6 @@ export class LLMClient {
     // If we hit maxTurns, return what we have
     this.log?.warn("Agent loop hit maxTurns", { maxTurns, totalMessages: allMessages.length });
     const lastAssistant = allMessages.filter((m) => m.role === "assistant").pop();
-    return {
-      messages: allMessages,
-      finalContent: lastAssistant?.content ?? "",
-    };
+    return { messages: allMessages, finalContent: lastAssistant?.content ?? "", usage };
   }
 }

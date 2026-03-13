@@ -122,6 +122,11 @@ app.get("/conversations/:id", async (c) => {
     return c.json({ error: "Conversation not found or expired" }, 404);
   }
 
+  // Compute aggregate usage from turn metrics
+  const turnMetrics = state.turnMetrics ?? [];
+  const totalTokens = turnMetrics.reduce((sum, t) => sum + (t.tokens ?? 0), 0);
+  const totalCost = turnMetrics.reduce((sum, t) => sum + (t.cost ?? 0), 0);
+
   return c.json({
     conversationId: state.conversationId,
     product: state.product,
@@ -130,6 +135,8 @@ app.get("/conversations/:id", async (c) => {
     createdAt: state.createdAt,
     lastActivityAt: state.lastActivityAt,
     messages: state.messages,
+    turnMetrics,
+    usage: { totalTokens, totalCost },
   });
 });
 

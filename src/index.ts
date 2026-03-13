@@ -114,7 +114,7 @@ async function handleScheduled(
 
   // Clean up orphaned Daytona sandboxes
   try {
-    const daytona = new DaytonaClient(env);
+    const daytona = new DaytonaClient(env, log.child({ task: "cleanup" }), metrics);
     const cleaned = await daytona.cleanup();
     if (cleaned > 0) {
       log.info("Cleaned up orphaned Daytona sandboxes", { cleaned });

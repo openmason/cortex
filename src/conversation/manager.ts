@@ -6,6 +6,14 @@ import type { Logger } from "../observability/logger";
 // Conversation State
 // ---------------------------------------------------------------------------
 
+export interface TurnMetrics {
+  turn: number;
+  tokens?: number;
+  cost?: number;
+  toolCalls?: string[];    // tool names invoked in this turn
+  durationMs?: number;
+}
+
 export interface ConversationState {
   conversationId: string;
   tenantId: string;
@@ -15,6 +23,7 @@ export interface ConversationState {
   lastActivityAt: string;
   turnCount: number;
   messages: ChatMessage[]; // user + assistant only (no system, no tool)
+  turnMetrics?: TurnMetrics[];
 }
 
 export interface ConversationConfig {

@@ -1,5 +1,7 @@
 import { Daytona } from "@daytonaio/sdk";
 import type { Env, SandboxRequest, SandboxResult } from "../types";
+import type { Logger } from "../observability/logger";
+import type { Metrics } from "../observability/metrics";
 
 /**
  * DaytonaClient — manages sandbox lifecycle for L3 (container) execution.
@@ -14,9 +16,13 @@ import type { Env, SandboxRequest, SandboxResult } from "../types";
 export class DaytonaClient {
   private client: Daytona;
   private env: Env;
+  private log?: Logger;
+  private metrics?: Metrics;
 
-  constructor(env: Env) {
+  constructor(env: Env, log?: Logger, metrics?: Metrics) {
     this.env = env;
+    this.log = log;
+    this.metrics = metrics;
     this.client = new Daytona({
       apiKey: env.DAYTONA_API_KEY,
       apiUrl: env.DAYTONA_API_URL ?? "https://app.daytona.io/api",
@@ -32,6 +38,8 @@ export class DaytonaClient {
     const start = Date.now();
     let sandbox;
 
+    this.log?.info("Sandbox execute", { skillId: request.skillId, bundleKey: request.bundleKey, language: request.language });
+
     try {
       // 1. Create sandbox (use snapshot if provided for fast boot)
       const createOpts: Record<string, unknown> = {
@@ -43,11 +51,14 @@ export class DaytonaClient {
       }
 
       sandbox = await this.client.create(createOpts as any);
+      const bootMs = Date.now() - start;
+      this.log?.debug("Sandbox created", { skillId: request.skillId, bootMs });
 
       // 2. Upload the skill bundle from R2 if a bundleKey is provided
       if (request.bundleKey) {
         const obj = await this.env.R2_BUCKET.get(request.bundleKey);
         if (!obj) {
+          this.log?.warn("Bundle not found in R2", { bundleKey: request.bundleKey });
           return {
             exitCode: 1,
             stdout: "",
@@ -69,18 +80,27 @@ export class DaytonaClient {
         request.timeoutSecs ?? 60,
       );
 
+      const durationMs = Date.now() - start;
+      const exitCode = response.exitCode ?? 0;
+      this.log?.info("Sandbox execution completed", { skillId: request.skillId, exitCode, durationMs });
+      this.metrics?.write("sandbox_exec", { skillSlug: request.skillId, status: exitCode === 0 ? "ok" : "error", durationMs });
+
       return {
-        exitCode: response.exitCode ?? 0,
+        exitCode,
         stdout: response.result ?? "",
         stderr: "",
-        durationMs: Date.now() - start,
+        durationMs,
       };
     } catch (err) {
+      const durationMs = Date.now() - start;
+      const errMsg = err instanceof Error ? err.message : String(err);
+      this.log?.error("Sandbox execution failed", { skillId: request.skillId, error: errMsg, durationMs });
+      this.metrics?.write("sandbox_exec", { skillSlug: request.skillId, status: "error", durationMs, error: errMsg });
       return {
         exitCode: 1,
         stdout: "",
-        stderr: err instanceof Error ? err.message : String(err),
-        durationMs: Date.now() - start,
+        stderr: errMsg,
+        durationMs,
       };
     } finally {
       // 4. Always clean up the sandbox
@@ -125,23 +145,32 @@ export class DaytonaClient {
     const start = Date.now();
     let sandbox;
 
+    this.log?.debug("Sandbox codeRun", { codeLength: code.length, timeoutSecs });
+
     try {
       sandbox = await this.client.create({ language: "javascript" as any });
 
       const response = await sandbox.process.codeRun(code, undefined, timeoutSecs);
 
+      const durationMs = Date.now() - start;
+      const exitCode = response.exitCode ?? 0;
+      this.log?.debug("Sandbox codeRun completed", { exitCode, durationMs });
+
       return {
-        exitCode: response.exitCode ?? 0,
+        exitCode,
         stdout: response.result ?? "",
         stderr: "",
-        durationMs: Date.now() - start,
+        durationMs,
       };
     } catch (err) {
+      const durationMs = Date.now() - start;
+      const errMsg = err instanceof Error ? err.message : String(err);
+      this.log?.error("Sandbox codeRun failed", { error: errMsg, durationMs });
       return {
         exitCode: 1,
         stdout: "",
-        stderr: err instanceof Error ? err.message : String(err),
-        durationMs: Date.now() - start,
+        stderr: errMsg,
+        durationMs,
       };
     } finally {
       if (sandbox) {

@@ -27,6 +27,7 @@ const runSchema = z.object({
   appetite: z.enum(["strict", "cautious", "balanced", "adventurous"]).optional(),
   context: z.record(z.unknown()).optional(),
   conversationId: z.string().regex(/^conv_[0-9a-f-]{36}$/, "Invalid conversationId format").optional(),
+  stream: z.boolean().optional(),
 });
 
 app.post("/run", async (c) => {
@@ -37,12 +38,45 @@ app.post("/run", async (c) => {
     return c.json({ error: "Invalid request", details: parsed.error.flatten() }, 400);
   }
 
+  const wantsStream = parsed.data.stream === true || c.req.header("Accept")?.includes("text/event-stream");
+
   const request: RunRequest = {
     ...parsed.data,
     tenantId: parsed.data.tenantId ?? c.get("tenantId"),
     userId: parsed.data.userId ?? c.get("userId"),
     product: parsed.data.product ?? c.get("product"),
   };
+
+  // If streaming requested, delegate to the SSE path
+  if (wantsStream) {
+    return streamSSE(c, async (stream) => {
+      let eventId = 0;
+      const onEvent = async (event: SSEEvent) => {
+        await stream.writeSSE({
+          event: event.event,
+          data: JSON.stringify(event.data),
+          id: String(eventId++),
+        });
+      };
+
+      try {
+        const log = new Logger("supervisor", {
+          requestId: c.get("requestId"),
+          tenantId: request.tenantId,
+          product: request.product,
+        });
+        const metrics = new Metrics(c.env.ANALYTICS);
+        const supervisor = new SupervisorAgent(c.env, log, metrics);
+        await supervisor.handleRequestStreaming(request, c.executionCtx, onEvent);
+      } catch (err) {
+        await onEvent({
+          event: "error",
+          data: { message: err instanceof Error ? err.message : "Internal server error" },
+        });
+        await onEvent({ event: "done", data: {} });
+      }
+    });
+  }
 
   const start = Date.now();
   const log = new Logger("supervisor", {

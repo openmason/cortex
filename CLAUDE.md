@@ -79,8 +79,8 @@ Runics (registry) ──→ Cognium (internal trust/scanning)
 ## API Endpoints
 - `GET /` — Service info
 - `GET /health` — Health check (KV + DB/Hyperdrive + Runics)
-- `POST /v1/run` — Start workflow (JSON response)
-- `POST /v1/run/stream` — Start workflow (SSE streaming)
+- `POST /v1/run` — Start workflow (JSON response; add `"stream": true` or `Accept: text/event-stream` for SSE)
+- `POST /v1/run/stream` — Start workflow (SSE streaming, dedicated endpoint)
 - `GET /v1/run/:id` — Workflow status
 - `POST /v1/run/:id/resume` — Resume paused workflow
 - `POST /v1/run/:id/save` — Save workflow as skill
@@ -112,9 +112,10 @@ When a skill has no executable bundle (no `mcpUrl`, no `skillMd`, no `r2BundleKe
 
 ## Daytona Integration
 - SDK: `@daytonaio/sdk` (direct API, not REST)
-- `DaytonaClient.execute()` — shell command execution in sandbox
+- `DaytonaClient.execute()` — shell command execution in sandbox (with structured logging and `sandbox_exec` metrics)
 - `DaytonaClient.runCode()` — direct code execution via `codeRun()` (used by codegen fallback)
 - `DaytonaClient.cleanup()` — lists and deletes all sandboxes (called by cron)
+- Constructor accepts optional `Logger` and `Metrics` for observability; passed from `ExecutionRouter` and cron handler
 - Target region: `DAYTONA_TARGET` env var (default: `us`)
 - Sandbox lifecycle: create → execute → delete (always cleaned up in `finally` block)
 
@@ -130,9 +131,10 @@ When a skill has no executable bundle (no `mcpUrl`, no `skillMd`, no `r2BundleKe
 - All cache writes are best-effort (wrapped in try/catch)
 
 ## SSE Streaming
-- `POST /v1/run/stream` returns Server-Sent Events
+- `POST /v1/run/stream` returns Server-Sent Events (dedicated streaming endpoint)
+- `POST /v1/run` with `"stream": true` in body or `Accept: text/event-stream` header also returns SSE (unified endpoint)
 - Event types: `planning`, `tool_call`, `tool_result`, `step_start`, `step_complete`, `workflow_complete`, `error`, `done`, `conversation`
-- Non-streaming `/v1/run` unchanged
+- `done` event includes `usage: { totalTokens, totalCost }` for cost tracking
 
 ## Tenant Policies
 - Policy loading chain: KV cache (5 min TTL) → DB (`tenant_policies` table) → `defaultPolicy()` fallback
@@ -153,7 +155,7 @@ When a skill has no executable bundle (no `mcpUrl`, no `skillMd`, no `r2BundleKe
 - Backward compat: old states without `timeoutAt` are never lazily timed out
 
 ## Testing
-- 401 unit tests passing across 25 test files (`npx vitest run`)
+- 410 unit tests passing across 25 test files (`npx vitest run`)
 - Local dev tested with `npx wrangler dev` — health, models, and full run request all work
 - E2E verified live: codegen pipeline working end-to-end (findSkill → invokeSkill → codegen → Daytona → result)
 - E2E smoke test: `ADMIN_SECRET=<secret> npx tsx scripts/smoke-test.ts` (9 tests against live deployment)
@@ -207,15 +209,18 @@ Cognium and Forge queue integrations have been removed. What remains:
 ## Observability
 - **Structured logging**: `src/observability/logger.ts` — JSON output via console.log/warn/error/debug, child loggers, level filtering (debug < info < warn < error)
 - **Metrics**: `src/observability/metrics.ts` — Cloudflare Analytics Engine `writeDataPoint()`, fire-and-forget, no-op when binding missing
-- **Analytics Engine dataset**: `cortex_metrics` (binding: `ANALYTICS`) — index: tenantId, blobs: [event, requestId, product, skillSlug, status, error], doubles: [durationMs, tokens]
+- **Analytics Engine dataset**: `cortex_metrics` (binding: `ANALYTICS`) — BLOCKED on dashboard enablement (error 10089). Binding commented out in `wrangler.toml`. Code is ready — `Metrics` class no-ops when `ANALYTICS` is undefined. Schema: index: tenantId, blobs: [event, requestId, product, skillSlug, status, error], doubles: [durationMs, tokens, cost]
 - **Request ID**: `X-Request-ID` header propagated/generated on every request, threaded through Logger context
 - **Constructor chain**: Logger + Metrics created per-request in route handlers, passed through Supervisor → Engine → Router → Repository via optional constructor params
 - **Instrumentation points**: request (run handler), skill_exec (router), codegen (router), llm_call (LLMClient), api_usage (auth middleware), workflow (engine), cron (index.ts)
 - **Per-API-key tracking**: `usageTrackingMiddleware` fires `api_usage` event after every `/v1/*` request with key prefix (first 8 chars), HTTP status, endpoint (on error), latency
+- **Per-turn usage tracking**: `ConversationState.turnMetrics` records tokens, cost, and tool calls for each LLM turn. `GET /v1/sessions/conversations/:id` returns `turnMetrics` array + aggregate `usage: { totalTokens, totalCost }`
+- **RunResponse usage**: `POST /v1/run` returns `usage: { totalTokens, totalCost }` from the agent loop
 
 ## Next Steps (Prioritized)
-1. Enable Analytics Engine on Cloudflare dashboard, uncomment binding in `wrangler.toml`, redeploy
+1. Enable Analytics Engine on Cloudflare dashboard (binding already in `wrangler.toml`), then redeploy
 2. Top up OpenRouter credits (currently 402 — insufficient credits)
 3. Webhook/callback support for long-running workflows
 4. E2E test for buildPlan multi-step workflow path (live, not just unit tests)
 5. Production CORS lockdown (currently allows all origins)
+6. Token-level streaming (stream LLM tokens to client as they arrive, not just tool events)

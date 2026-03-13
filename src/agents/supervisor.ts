@@ -12,7 +12,7 @@ import type {
   SaveAsSkillResponse,
 } from "../types";
 import { RunicsClient } from "../clients/runics";
-import { LLMClient, type ChatMessage } from "../clients/llm";
+import { LLMClient, type ChatMessage, type AgentLoopUsage } from "../clients/llm";
 import { WorkflowEngine } from "../workflow/engine";
 import { PolicyEngine } from "../policy/engine";
 import { ConversationManager, type ConversationState } from "../conversation/manager";
@@ -113,7 +113,7 @@ export class SupervisorAgent {
 
     // Run the agentic loop — the LLM will call findSkill, checkPolicy, buildPlan, etc.
     const toolModel = await this.llm.getToolCallModel();
-    let agentResult: { messages: ChatMessage[]; finalContent: string };
+    let agentResult: { messages: ChatMessage[]; finalContent: string; usage: AgentLoopUsage };
     try {
       agentResult = await this.llm.agentLoop(
         messages,
@@ -137,6 +137,18 @@ export class SupervisorAgent {
     const currentTurnMessages = newMessages.slice(convState.messages.length);
     convState.messages.push(...currentTurnMessages);
     convState.turnCount++;
+
+    // Track per-turn metrics
+    if (!convState.turnMetrics) convState.turnMetrics = [];
+    for (const turnUsage of agentResult.usage.turns) {
+      convState.turnMetrics.push({
+        turn: convState.turnCount - 1,
+        tokens: turnUsage.tokens,
+        cost: turnUsage.cost,
+        toolCalls: turnUsage.toolCalls,
+      });
+    }
+
     executionCtx.waitUntil(this.conversations.save(convState));
 
     // Extract the plan from the tool calls (look for the last buildPlan result)
@@ -149,6 +161,7 @@ export class SupervisorAgent {
         status: "completed",
         summary: agentResult.finalContent || "No actionable skills found for your request.",
         conversationId,
+        usage: { totalTokens: agentResult.usage.totalTokens, totalCost: agentResult.usage.totalCost },
       };
     }
 
@@ -165,6 +178,7 @@ export class SupervisorAgent {
           plan,
           summary: `Blocked by policy: ${reasons}`,
           conversationId,
+          usage: { totalTokens: agentResult.usage.totalTokens, totalCost: agentResult.usage.totalCost },
         };
       }
 
@@ -176,7 +190,7 @@ export class SupervisorAgent {
     // Execute via the workflow engine
     const state = await this.engine.start(plan, tenant, executionCtx);
 
-    return this.stateToResponse(state, agentResult.finalContent, conversationId);
+    return this.stateToResponse(state, agentResult.finalContent, conversationId, agentResult.usage);
   }
 
   /**
@@ -325,7 +339,7 @@ export class SupervisorAgent {
     await onEvent({ event: "planning", data: { prompt: request.prompt, product: request.product } });
 
     const toolModel = await this.llm.getToolCallModel();
-    let agentResult: { messages: ChatMessage[]; finalContent: string };
+    let agentResult: { messages: ChatMessage[]; finalContent: string; usage: AgentLoopUsage };
     try {
       agentResult = await this.llm.agentLoop(
         messages,
@@ -350,17 +364,30 @@ export class SupervisorAgent {
     const currentTurnMessages = newMessages.slice(convState.messages.length);
     convState.messages.push(...currentTurnMessages);
     convState.turnCount++;
+
+    // Track per-turn metrics
+    if (!convState.turnMetrics) convState.turnMetrics = [];
+    for (const turnUsage of agentResult.usage.turns) {
+      convState.turnMetrics.push({
+        turn: convState.turnCount - 1,
+        tokens: turnUsage.tokens,
+        cost: turnUsage.cost,
+        toolCalls: turnUsage.toolCalls,
+      });
+    }
+
     executionCtx.waitUntil(this.conversations.save(convState));
 
     const plan = this.extractPlanFromMessages(agentResult.messages, toolExecutor, tenant);
 
     if (!plan) {
-      await onEvent({ event: "done", data: { summary: agentResult.finalContent, conversationId } });
+      await onEvent({ event: "done", data: { summary: agentResult.finalContent, conversationId, usage: { totalTokens: agentResult.usage.totalTokens, totalCost: agentResult.usage.totalCost } } });
       return {
         workflowId: crypto.randomUUID(),
         status: "completed",
         summary: agentResult.finalContent || "No actionable skills found for your request.",
         conversationId,
+        usage: { totalTokens: agentResult.usage.totalTokens, totalCost: agentResult.usage.totalCost },
       };
     }
 
@@ -379,6 +406,7 @@ export class SupervisorAgent {
           plan,
           summary: `Blocked by policy: ${reasons}`,
           conversationId,
+          usage: { totalTokens: agentResult.usage.totalTokens, totalCost: agentResult.usage.totalCost },
         };
       }
 
@@ -390,9 +418,9 @@ export class SupervisorAgent {
     // Execute with event callbacks
     const state = await this.engine.start(plan, tenant, executionCtx, undefined, onEvent);
 
-    await onEvent({ event: "done", data: { workflowId: state.workflowId, status: state.status, conversationId } });
+    await onEvent({ event: "done", data: { workflowId: state.workflowId, status: state.status, conversationId, usage: { totalTokens: agentResult.usage.totalTokens, totalCost: agentResult.usage.totalCost } } });
 
-    return this.stateToResponse(state, agentResult.finalContent, conversationId);
+    return this.stateToResponse(state, agentResult.finalContent, conversationId, agentResult.usage);
   }
 
   /**
@@ -592,7 +620,7 @@ IMPORTANT: You must call tools to completion. Do NOT stop after findSkill — al
     };
   }
 
-  private stateToResponse(state: WorkflowState, llmSummary?: string, conversationId?: string): RunResponse {
+  private stateToResponse(state: WorkflowState, llmSummary?: string, conversationId?: string, usage?: AgentLoopUsage): RunResponse {
     return {
       workflowId: state.workflowId,
       status: state.status,
@@ -600,6 +628,7 @@ IMPORTANT: You must call tools to completion. Do NOT stop after findSkill — al
       result: state.status === "completed" ? this.collectResults(state.plan) : undefined,
       summary: llmSummary || this.buildSummary(state),
       conversationId,
+      usage: usage ? { totalTokens: usage.totalTokens, totalCost: usage.totalCost } : undefined,
     };
   }
 
