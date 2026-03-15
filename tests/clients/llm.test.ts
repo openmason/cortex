@@ -629,14 +629,9 @@ describe("LLMClient", () => {
   });
 
   describe("agentLoopStreaming", () => {
-    it("should stream text deltas via onEvent", async () => {
+    it("should emit text events via onEvent", async () => {
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
-        makeStreamResponse(
-          makeChunkSSE("Hello"),
-          makeChunkSSE(", "),
-          makeChunkSSE("world!"),
-          makeChunkSSE(null, undefined, "stop", { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }),
-        ),
+        mockOk(makeChatResponse("Hello, world!")),
       ));
 
       const events: any[] = [];
@@ -654,31 +649,24 @@ describe("LLMClient", () => {
       const textEnd = events.find((e) => e.type === "text-end");
 
       expect(textStart).toBeDefined();
-      expect(textDeltas).toHaveLength(3);
-      expect(textDeltas[0].delta).toBe("Hello");
-      expect(textDeltas[1].delta).toBe(", ");
-      expect(textDeltas[2].delta).toBe("world!");
+      expect(textDeltas).toHaveLength(1);
+      expect(textDeltas[0].delta).toBe("Hello, world!");
       expect(textEnd).toBeDefined();
       expect(textStart.id).toBe(textEnd.id);
     });
 
-    it("should accumulate tool call deltas and execute them", async () => {
+    it("should execute tool calls and emit events", async () => {
       let callIndex = 0;
       vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
         callIndex++;
         if (callIndex === 1) {
-          // First turn: tool call streamed in chunks
-          return Promise.resolve(makeStreamResponse(
-            makeChunkSSE(undefined, [{ index: 0, id: "call-1", function: { name: "findSkill", arguments: '{"qu' } }]),
-            makeChunkSSE(undefined, [{ index: 0, function: { arguments: 'ery":"lint"}' } }]),
-            makeChunkSSE(null, undefined, "tool_calls", { prompt_tokens: 50, completion_tokens: 20, total_tokens: 70 }),
-          ));
+          return Promise.resolve(mockOk(makeChatResponse(null, [{
+            id: "call-1",
+            type: "function",
+            function: { name: "findSkill", arguments: '{"query":"lint"}' },
+          }], "tool_calls")));
         }
-        // Second turn: text response
-        return Promise.resolve(makeStreamResponse(
-          makeChunkSSE("Found a linting skill."),
-          makeChunkSSE(null, undefined, "stop", { prompt_tokens: 80, completion_tokens: 10, total_tokens: 90 }),
-        ));
+        return Promise.resolve(mockOk(makeChatResponse("Found a linting skill.")));
       }));
 
       const toolExecutor = vi.fn().mockResolvedValue({ results: ["lint-tool"] });
@@ -708,12 +696,13 @@ describe("LLMClient", () => {
     });
 
     it("should respect maxTurns in streaming mode", async () => {
-      vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
-        return Promise.resolve(makeStreamResponse(
-          makeChunkSSE(undefined, [{ index: 0, id: "call-x", function: { name: "findSkill", arguments: '{"query":"x"}' } }]),
-          makeChunkSSE(null, undefined, "tool_calls", { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }),
-        ));
-      }));
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+        mockOk(makeChatResponse(null, [{
+          id: "call-x",
+          type: "function",
+          function: { name: "findSkill", arguments: '{"query":"x"}' },
+        }], "tool_calls")),
+      ));
 
       await client.agentLoopStreaming(
         [{ role: "user", content: "loop" }],
@@ -727,10 +716,7 @@ describe("LLMClient", () => {
 
     it("should return same shape as agentLoop()", async () => {
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
-        makeStreamResponse(
-          makeChunkSSE("Answer"),
-          makeChunkSSE(null, undefined, "stop", { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15, cost: 0.01 }),
-        ),
+        mockOk(makeChatResponse("Answer")),
       ));
 
       const result = await client.agentLoopStreaming(
@@ -745,8 +731,8 @@ describe("LLMClient", () => {
       expect(result.usage).toHaveProperty("totalTokens");
       expect(result.usage).toHaveProperty("totalCost");
       expect(result.usage).toHaveProperty("turns");
-      expect(result.usage.totalTokens).toBe(15);
-      expect(result.usage.totalCost).toBe(0.01);
+      expect(result.usage.totalTokens).toBe(150);
+      expect(result.usage.totalCost).toBe(0);
     });
 
     it("should handle content and tool calls in the same turn", async () => {
@@ -754,17 +740,14 @@ describe("LLMClient", () => {
       vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
         callIndex++;
         if (callIndex === 1) {
-          // Some models emit text before tool calls
-          return Promise.resolve(makeStreamResponse(
-            makeChunkSSE("Let me search for that..."),
-            makeChunkSSE(undefined, [{ index: 0, id: "call-1", function: { name: "findSkill", arguments: '{"query":"test"}' } }]),
-            makeChunkSSE(null, undefined, "tool_calls", { prompt_tokens: 50, completion_tokens: 30, total_tokens: 80 }),
-          ));
+          // Some models emit text alongside tool calls
+          return Promise.resolve(mockOk(makeChatResponse("Let me search for that...", [{
+            id: "call-1",
+            type: "function",
+            function: { name: "findSkill", arguments: '{"query":"test"}' },
+          }], "tool_calls")));
         }
-        return Promise.resolve(makeStreamResponse(
-          makeChunkSSE("Found it!"),
-          makeChunkSSE(null, undefined, "stop", { prompt_tokens: 80, completion_tokens: 10, total_tokens: 90 }),
-        ));
+        return Promise.resolve(mockOk(makeChatResponse("Found it!")));
       }));
 
       const events: any[] = [];
@@ -775,7 +758,7 @@ describe("LLMClient", () => {
         { onEvent: (e) => { events.push(e); } },
       );
 
-      // Text from first turn should have been streamed
+      // Text from first turn should have been emitted
       const firstTextDelta = events.find((e) => e.type === "text-delta" && e.delta === "Let me search for that...");
       expect(firstTextDelta).toBeDefined();
 

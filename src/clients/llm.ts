@@ -620,8 +620,10 @@ export class LLMClient {
   }
 
   /**
-   * Streaming variant of agentLoop: streams LLM tokens to the client via onEvent
-   * as they arrive, instead of buffering the full response per turn.
+   * Event-emitting variant of agentLoop: uses non-streaming chat() internally
+   * (because LLM proxy providers don't reliably stream tool_calls deltas) but
+   * emits text-start/text-delta/text-end and tool-call/tool-result events so
+   * clients receive the AI SDK stream event protocol.
    *
    * Same signature and return type as agentLoop().
    */
@@ -631,107 +633,67 @@ export class LLMClient {
     toolExecutor: (name: string, args: Record<string, unknown>) => Promise<unknown>,
     options: { model?: string; maxTurns?: number; temperature?: number; maxTokens?: number; onEvent?: OnStreamEvent } = {},
   ): Promise<{ messages: ChatMessage[]; finalContent: string; usage: AgentLoopUsage }> {
+    // Uses non-streaming chat() internally because many LLM proxy providers
+    // (Workers AI, OpenRouter) don't reliably stream tool_calls deltas.
+    // Text content is emitted as text-start/text-delta/text-end events after
+    // each turn completes so the client still gets the streaming event protocol.
     const maxTurns = options.maxTurns ?? 10;
     const allMessages = [...messages];
     const usage: AgentLoopUsage = { totalTokens: 0, totalCost: 0, turns: [] };
 
     for (let turn = 0; turn < maxTurns; turn++) {
-      let contentAccumulator = "";
-      const toolCallAccumulators = new Map<number, { id: string; name: string; arguments: string }>();
-      let finishReason = "stop";
-      let turnUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number; cost?: number } | undefined;
-      let textStarted = false;
-      const textId = `text_${turn}_${crypto.randomUUID().slice(0, 8)}`;
-
-      for await (const chunk of this.chatStream({
+      const response = await this.chat({
         model: options.model,
         messages: allMessages,
         tools,
         tool_choice: "auto",
         temperature: options.temperature ?? 0.2,
         max_tokens: options.maxTokens ?? 4096,
-      })) {
-        const choice = chunk.choices[0];
-        if (!choice) continue;
+      });
 
-        // Stream content deltas to client
-        if (choice.delta.content) {
-          if (!textStarted) {
-            await options.onEvent?.({ type: "text-start", id: textId });
-            textStarted = true;
-          }
-          contentAccumulator += choice.delta.content;
-          await options.onEvent?.({ type: "text-delta", id: textId, delta: choice.delta.content });
-        }
-
-        // Accumulate tool call deltas
-        if (choice.delta.tool_calls) {
-          for (const tc of choice.delta.tool_calls) {
-            const existing = toolCallAccumulators.get(tc.index);
-            if (!existing) {
-              toolCallAccumulators.set(tc.index, {
-                id: tc.id ?? "",
-                name: tc.function?.name ?? "",
-                arguments: tc.function?.arguments ?? "",
-              });
-            } else {
-              if (tc.id) existing.id = tc.id;
-              if (tc.function?.name) existing.name = tc.function.name;
-              if (tc.function?.arguments) existing.arguments += tc.function.arguments;
-            }
-          }
-        }
-
-        // Capture usage (typically in the final chunk)
-        if (chunk.usage) {
-          turnUsage = chunk.usage;
-        }
-
-        // Capture finish reason
-        if (choice.finish_reason) {
-          finishReason = choice.finish_reason;
-        }
-      }
-
-      // Close text stream if it was opened
-      if (textStarted) {
-        await options.onEvent?.({ type: "text-end", id: textId });
+      const choice = response.choices[0];
+      if (!choice) {
+        throw new Error("LLM proxy returned no choices");
       }
 
       // Track usage for this turn
-      const turnTokens = turnUsage?.total_tokens ?? 0;
-      const turnCost = turnUsage?.cost;
+      const turnTokens = response.usage?.total_tokens ?? 0;
+      const turnCost = response.usage?.cost;
       usage.totalTokens += turnTokens;
       if (turnCost) usage.totalCost += turnCost;
 
-      // Build complete tool calls from accumulated deltas
-      const assembledToolCalls: ToolCall[] = [];
-      for (const [, tc] of toolCallAccumulators) {
-        const validated = this.validateToolCall(
-          { id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } },
-          turn,
-        );
-        if (validated) assembledToolCalls.push(validated);
+      // Emit text content as stream events
+      const content = choice.message.content ?? "";
+      if (content) {
+        const textId = `text_${turn}_${crypto.randomUUID().slice(0, 8)}`;
+        await options.onEvent?.({ type: "text-start", id: textId });
+        await options.onEvent?.({ type: "text-delta", id: textId, delta: content });
+        await options.onEvent?.({ type: "text-end", id: textId });
       }
 
-      // Build the assistant message for conversation history
-      const assistantMessage: ChatMessage = {
-        role: "assistant",
-        content: contentAccumulator || null,
-        ...(assembledToolCalls.length > 0 ? { tool_calls: assembledToolCalls } : {}),
-      };
-      allMessages.push(assistantMessage);
+      // Add the assistant message
+      allMessages.push(choice.message);
 
       // If no tool calls, we're done
-      const hasToolCalls = this.isToolCallFinishReason(finishReason) && assembledToolCalls.length > 0;
+      const hasToolCalls = this.isToolCallFinishReason(choice.finish_reason) && choice.message.tool_calls?.length;
       if (!hasToolCalls) {
         usage.turns.push({ turn, tokens: turnTokens, cost: turnCost, toolCalls: [] });
         this.log?.debug("Streaming agent loop completed", { turn, totalMessages: allMessages.length });
-        return { messages: allMessages, finalContent: contentAccumulator, usage };
+        return { messages: allMessages, finalContent: content, usage };
       }
 
-      // Execute tool calls
-      const toolCallNames = assembledToolCalls.map((tc) => tc.function.name);
+      // Validate tool calls
+      const validToolCalls = choice.message.tool_calls!
+        .map((tc) => this.validateToolCall(tc, turn))
+        .filter((tc): tc is ToolCall => tc !== null);
+
+      if (validToolCalls.length === 0) {
+        usage.turns.push({ turn, tokens: turnTokens, cost: turnCost, toolCalls: [] });
+        this.log?.warn("All tool calls in turn were malformed, ending loop", { turn });
+        return { messages: allMessages, finalContent: content, usage };
+      }
+
+      const toolCallNames = validToolCalls.map((tc) => tc.function.name);
       usage.turns.push({ turn, tokens: turnTokens, cost: turnCost, toolCalls: toolCallNames });
 
       this.log?.debug("Processing tool calls (streaming)", {
@@ -740,8 +702,8 @@ export class LLMClient {
         messageCount: allMessages.length,
       });
 
-      for (let i = 0; i < assembledToolCalls.length; i++) {
-        const toolCall = assembledToolCalls[i];
+      for (let i = 0; i < validToolCalls.length; i++) {
+        const toolCall = validToolCalls[i];
         const toolCallId = toolCall.id || `tc_${turn}_${i}`;
 
         let parsedArgs: Record<string, unknown> = {};
