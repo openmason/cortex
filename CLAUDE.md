@@ -33,8 +33,8 @@ Runics (registry) ──→ Cognium (internal trust/scanning)
 ## LLM Proxy
 - URL: `https://llmproxy.xus.one` (OpenAI-compatible, routed via LiteLLM → OpenRouter / Cloudflare Workers AI)
 - API Key: set as `LLMPROXY_API_KEY` secret
-- Default model (`LLM_MODEL`): `cognium/gpt-oss-120b` (free, Cloudflare Workers AI — no tool calling)
-- Tool call model (`TOOL_CALL_MODEL`): `cognium/grok-code-latest` (Grok Code Fast 1, $0.20/$0.50 per 1M tokens — cheapest tool-capable model)
+- Default model (`LLM_MODEL`): `cognium/gpt-oss-120b` (free, Cloudflare Workers AI — supports tool calling via `/v1/chat/completions`)
+- Tool call model (`TOOL_CALL_MODEL`): optional override. Not needed when `gpt-oss-120b` handles both chat and tool calling.
 - **Model selection**: `getToolCallModel()` queries proxy capabilities (KV-cached 5 min), selects best tool-capable model. `TOOL_CALL_MODEL` env var is an optional override.
 - **No-tool-call fallback**: `handleRequest` and `handleRequestStreaming` check `hasToolCapableModel()` first. If no tool-capable model is available, they automatically fall back to `handleRequestDirect` (Runics keyword search → execute, no LLM planning loop).
 - **Model fallback**: Proxy handles model-level fallback chains (e.g. claude-sonnet → gemini-pro on 402). No client-side retry in `agentLoop`.
@@ -47,7 +47,7 @@ Runics (registry) ──→ Cognium (internal trust/scanning)
   - Premium: `claude-opus-latest` (Opus 4.6, $5/$25), `openai-gpt-latest` (GPT-5.2, $1.75/$14), `claude-sonnet-latest` (Sonnet 4.5, ~$1/$5)
   - Budget: `grok-code-latest` (Grok Code Fast 1, $0.20/$0.50), `deepseek-latest` (V3.2, $0.24/$0.38), `claude-haiku-latest` (Haiku 4.5, $0.25/$1.25)
   - Specialized: `gemini-pro-latest` (1M context, $2/$12), `z-ai-latest` (GLM-5, $0.30/$2.55), `minimax-m-latest` (M2.5, $0.30/$1.20)
-  - Free: `gpt-oss-120b`, `qwen-2.5-coder` (Cloudflare Workers AI, no tool calling)
+  - Free: `gpt-oss-120b` (Cloudflare Workers AI, tool calling supported), `qwen-2.5-coder` (Cloudflare Workers AI, no tool calling)
 
 ## Infrastructure (Provisioned)
 - **Neon DB**: Connection string in `.dev.vars` / wrangler secret `DATABASE_URL`
@@ -102,6 +102,10 @@ Runics (registry) ──→ Cognium (internal trust/scanning)
 - `PATCH /v1/skills/composites/:slug` — Update composite metadata
 - `POST /v1/skills/composites/:slug/deprecate` — Deprecate a composite
 - `POST /v1/skills/composites/:slug/fork` — Fork a composite
+- `POST /v1/chat` — Clove-compatible chat (accepts `productId + messages` with parts, always streams AI SDK v5+ SSE)
+- `POST /v1/approvals/:id/approve` — Approve a paused workflow (alias for resume)
+- `POST /v1/approvals/:id/reject` — Reject a paused workflow (alias for resume with approved=false)
+- `GET /v1/analytics/usage` — Usage analytics for tenant (7d window, daily + per-endpoint breakdowns)
 - `POST /admin/api-keys` — Create API key
 - `DELETE /admin/api-keys/:key` — Revoke API key
 - `PUT /admin/policies` — Upsert tenant policy
@@ -127,7 +131,7 @@ When a skill has no executable bundle (no `mcpUrl`, no `skillMd`, no `r2BundleKe
 
 ## Rate Limiting
 - KV-based sliding window: 30 requests/minute per tenant
-- Applied to `/v1/run` and `/v1/run/*` routes
+- Applied to `/v1/run`, `/v1/run/*`, and `/v1/chat` routes
 - All KV writes are non-blocking (`waitUntil` + `try/catch`) to avoid blocking on KV daily write limits
 - Response headers: `X-RateLimit-Limit`, `X-RateLimit-Remaining`
 
@@ -161,7 +165,7 @@ When a skill has no executable bundle (no `mcpUrl`, no `skillMd`, no `r2BundleKe
 - Backward compat: old states without `timeoutAt` are never lazily timed out
 
 ## Testing
-- 423 unit tests passing across 26 test files (`npx vitest run`)
+- 454 unit tests passing across 29 test files (`npx vitest run`)
 - Local dev tested with `npx wrangler dev` — health, models, and full run request all work
 - E2E verified live: codegen pipeline working end-to-end (findSkill → invokeSkill → codegen → Daytona → result)
 - E2E smoke test: `ADMIN_SECRET=<secret> npx tsx scripts/smoke-test.ts` (9 tests against live deployment)
@@ -185,6 +189,9 @@ When a skill has no executable bundle (no `mcpUrl`, no `skillMd`, no `r2BundleKe
 - `src/routes/run.ts` — /v1/run, /v1/run/stream, /v1/run/:id, resume, save, models
 - `src/routes/sessions.ts` — /v1/sessions, /v1/sessions/:id, /v1/sessions/:id/trace, conversations CRUD
 - `src/routes/skills.ts` — /v1/skills/composites CRUD (list, detail, update, deprecate, fork)
+- `src/routes/chat.ts` — /v1/chat (Clove-compatible, AI SDK Data Stream Protocol)
+- `src/routes/approvals.ts` — /v1/approvals/:id/approve|reject (alias to engine.resume)
+- `src/routes/analytics.ts` — /v1/analytics/usage (tenant usage metrics)
 - `src/routes/admin.ts` — /admin/api-keys, /admin/policies
 - `src/routes/health.ts` — /health
 - `scripts/smoke-test.ts` — E2E smoke test against live deployment
@@ -202,7 +209,7 @@ Master specification: `cortex-specification.md`
 
 ## Known Issues
 - **KV free-tier daily write limit** — `WORKFLOW_STATE` KV still hits the daily write cap for workflow state writes and health checks. API keys are now in Neon DB (resolved). Health check uses read-only KV check to avoid burning writes. Rate limiter and auth backfill KV writes are non-blocking (`waitUntil` + `try/catch`).
-- **gpt-oss-120b / qwen-2.5-coder no tool calling** — Workers AI models confirmed `supports_tool_calls: false` by proxy capabilities. `hasToolCapableModel()` detects this and falls back to `handleRequestDirect` (no agentic planning loop). With OpenRouter models now available, the agentic loop is active when `TOOL_CALL_MODEL` is set to a capable model (default: `grok-code-latest`).
+- **Workers AI tool calling** — `gpt-oss-120b` supports tool calling via the `/v1/chat/completions` endpoint (proxy fix applied 2026-03-14). Requires: `content:null` → `""` sanitization, omit `tool_choice:"auto"`, tool param schemas use `type:"string"` (not objects). `qwen-2.5-coder` still no tool calling.
 
 ## Decoupling Status (Completed)
 Cognium and Forge queue integrations have been removed. What remains:
@@ -244,9 +251,9 @@ Key differences between the spec docs (`cortex-specification.md`, `runics-unifie
 - Custom data parts (via `{type:"data", data:[...]}`) carry `conversation`, `workflow-complete`, `approval-required`.
 
 ### API Shape Drift
-- Spec says `POST /v1/chat` — reality is `POST /v1/run`
-- Spec says `POST /v1/approvals/:id/approve` — reality is `POST /v1/run/:id/resume`
-- Spec says products send only `productId + userId + messages` — reality expects `product + prompt + appetite + mode`
+- `POST /v1/chat` — Clove-compatible endpoint added (accepts `productId + messages` with parts array, streams AI SDK v5+ SSE)
+- `POST /v1/approvals/:id/approve` and `/reject` — alias routes added, delegate to `engine.resume()`
+- `POST /v1/run` — original endpoint, accepts `product + prompt + appetite + mode`
 - Spec says per-product `approvalTimeoutMs` — reality uses global `WORKFLOW_TIMEOUT_MS`
 
 ### Activepieces — Not Started
