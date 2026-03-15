@@ -37,6 +37,7 @@ const chatSchema = z.object({
   userId: z.string().min(1).optional(),
   messages: z.array(messageSchema).min(1),
   conversationId: z.string().min(1).max(200).optional(),
+  sessionId: z.string().min(1).max(200).optional(), // alias for conversationId
   context: z.record(z.unknown()).optional(),
   model: z.string().max(100).optional(),
 });
@@ -73,12 +74,15 @@ app.post("/chat", async (c) => {
   }
 
   // Build RunRequest from chat format
+  // Accept sessionId as alias for conversationId (Bombastic/Clove sends sessionId)
+  const conversationId = parsed.data.conversationId ?? parsed.data.sessionId;
+
   const request: RunRequest = {
     prompt,
     tenantId: c.get("tenantId"),
     userId: parsed.data.userId ?? c.get("userId"),
     product: parsed.data.productId,
-    conversationId: parsed.data.conversationId,
+    conversationId,
     context: parsed.data.context,
     model: parsed.data.model,
   };

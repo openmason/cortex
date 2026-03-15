@@ -290,21 +290,6 @@ export class SupervisorAgent {
     executionCtx: ExecutionContext,
     onEvent: OnStreamEvent,
   ): Promise<RunResponse> {
-    // Check if tool calling is available; if not, fall back to direct mode
-    const hasToolCalling = await this.llm.hasToolCapableModel();
-    if (!hasToolCalling) {
-      this.log?.info("No tool-capable model available, using direct mode (streaming)");
-      const result = await this.handleRequestDirect(request, executionCtx);
-      const textId = `text_${crypto.randomUUID().slice(0, 8)}`;
-      if (result.summary) {
-        await onEvent({ type: "text-start", id: textId });
-        await onEvent({ type: "text-delta", id: textId, delta: result.summary });
-        await onEvent({ type: "text-end", id: textId });
-      }
-      await onEvent({ type: "finish", finishReason: "stop", usage: { totalTokens: result.usage?.totalTokens ?? 0 } });
-      return result;
-    }
-
     const config = getProductConfig(request.product);
 
     const tenant: TenantContext = {
