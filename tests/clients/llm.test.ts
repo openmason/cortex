@@ -489,4 +489,302 @@ describe("LLMClient", () => {
       expect(toolMsg!.content).toContain("Tool crashed");
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Streaming helpers
+  // -------------------------------------------------------------------------
+
+  function makeChunkSSE(
+    content?: string | null,
+    toolCalls?: Array<{ index: number; id?: string; function?: { name?: string; arguments?: string } }>,
+    finishReason?: string | null,
+    usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number; cost?: number },
+  ): string {
+    const chunk = {
+      id: "chatcmpl-stream-1",
+      object: "chat.completion.chunk",
+      created: Date.now(),
+      model: "claude-sonnet-4-20250514",
+      choices: [{
+        index: 0,
+        delta: {
+          ...(content !== undefined ? { content } : {}),
+          ...(toolCalls ? { tool_calls: toolCalls } : {}),
+        },
+        finish_reason: finishReason ?? null,
+      }],
+      ...(usage ? { usage } : {}),
+    };
+    return `data: ${JSON.stringify(chunk)}`;
+  }
+
+  function makeStreamResponse(...sseLines: string[]): { ok: true; body: ReadableStream; headers: typeof defaultHeaders } {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        for (const line of sseLines) {
+          controller.enqueue(encoder.encode(line + "\n\n"));
+        }
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    return { ok: true, body: stream, headers: defaultHeaders };
+  }
+
+  describe("chatStream", () => {
+    it("should yield chunks from streaming response", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+        makeStreamResponse(
+          makeChunkSSE("Hello"),
+          makeChunkSSE(" world"),
+          makeChunkSSE(null, undefined, "stop", { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }),
+        ),
+      ));
+
+      const chunks = [];
+      for await (const chunk of client.chatStream({
+        messages: [{ role: "user", content: "hi" }],
+      })) {
+        chunks.push(chunk);
+      }
+
+      expect(chunks).toHaveLength(3);
+      expect(chunks[0].choices[0].delta.content).toBe("Hello");
+      expect(chunks[1].choices[0].delta.content).toBe(" world");
+      expect(chunks[2].choices[0].finish_reason).toBe("stop");
+      expect(chunks[2].usage?.total_tokens).toBe(15);
+    });
+
+    it("should handle [DONE] sentinel", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+        makeStreamResponse(makeChunkSSE("hi")),
+      ));
+
+      const chunks = [];
+      for await (const chunk of client.chatStream({
+        messages: [{ role: "user", content: "hi" }],
+      })) {
+        chunks.push(chunk);
+      }
+
+      expect(chunks).toHaveLength(1);
+    });
+
+    it("should throw on non-ok response", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: false,
+        status: 429,
+        text: () => Promise.resolve("Rate limited"),
+      }));
+
+      const chunks = [];
+      await expect(async () => {
+        for await (const chunk of client.chatStream({
+          messages: [{ role: "user", content: "hi" }],
+        })) {
+          chunks.push(chunk);
+        }
+      }).rejects.toThrow("LLM proxy request failed: 429");
+    });
+
+    it("should include stream:true in request body", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+        makeStreamResponse(makeChunkSSE("ok", undefined, "stop")),
+      ));
+
+      const chunks = [];
+      for await (const chunk of client.chatStream({
+        messages: [{ role: "user", content: "hi" }],
+      })) {
+        chunks.push(chunk);
+      }
+
+      const body = JSON.parse((fetch as any).mock.calls[0][1].body);
+      expect(body.stream).toBe(true);
+      expect(body.stream_options).toEqual({ include_usage: true });
+    });
+
+    it("should yield tool call deltas", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+        makeStreamResponse(
+          makeChunkSSE(undefined, [{ index: 0, id: "call-1", function: { name: "findSkill", arguments: '{"qu' } }]),
+          makeChunkSSE(undefined, [{ index: 0, function: { arguments: 'ery":"test"}' } }]),
+          makeChunkSSE(null, undefined, "tool_calls"),
+        ),
+      ));
+
+      const chunks = [];
+      for await (const chunk of client.chatStream({
+        messages: [{ role: "user", content: "test" }],
+      })) {
+        chunks.push(chunk);
+      }
+
+      expect(chunks).toHaveLength(3);
+      expect(chunks[0].choices[0].delta.tool_calls?.[0].id).toBe("call-1");
+      expect(chunks[0].choices[0].delta.tool_calls?.[0].function?.name).toBe("findSkill");
+      expect(chunks[1].choices[0].delta.tool_calls?.[0].function?.arguments).toBe('ery":"test"}');
+    });
+  });
+
+  describe("agentLoopStreaming", () => {
+    it("should stream text deltas via onEvent", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+        makeStreamResponse(
+          makeChunkSSE("Hello"),
+          makeChunkSSE(", "),
+          makeChunkSSE("world!"),
+          makeChunkSSE(null, undefined, "stop", { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }),
+        ),
+      ));
+
+      const events: any[] = [];
+      const result = await client.agentLoopStreaming(
+        [{ role: "user", content: "hi" }],
+        [],
+        async () => ({}),
+        { onEvent: (e) => { events.push(e); } },
+      );
+
+      expect(result.finalContent).toBe("Hello, world!");
+
+      const textStart = events.find((e) => e.type === "text-start");
+      const textDeltas = events.filter((e) => e.type === "text-delta");
+      const textEnd = events.find((e) => e.type === "text-end");
+
+      expect(textStart).toBeDefined();
+      expect(textDeltas).toHaveLength(3);
+      expect(textDeltas[0].delta).toBe("Hello");
+      expect(textDeltas[1].delta).toBe(", ");
+      expect(textDeltas[2].delta).toBe("world!");
+      expect(textEnd).toBeDefined();
+      expect(textStart.id).toBe(textEnd.id);
+    });
+
+    it("should accumulate tool call deltas and execute them", async () => {
+      let callIndex = 0;
+      vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
+        callIndex++;
+        if (callIndex === 1) {
+          // First turn: tool call streamed in chunks
+          return Promise.resolve(makeStreamResponse(
+            makeChunkSSE(undefined, [{ index: 0, id: "call-1", function: { name: "findSkill", arguments: '{"qu' } }]),
+            makeChunkSSE(undefined, [{ index: 0, function: { arguments: 'ery":"lint"}' } }]),
+            makeChunkSSE(null, undefined, "tool_calls", { prompt_tokens: 50, completion_tokens: 20, total_tokens: 70 }),
+          ));
+        }
+        // Second turn: text response
+        return Promise.resolve(makeStreamResponse(
+          makeChunkSSE("Found a linting skill."),
+          makeChunkSSE(null, undefined, "stop", { prompt_tokens: 80, completion_tokens: 10, total_tokens: 90 }),
+        ));
+      }));
+
+      const toolExecutor = vi.fn().mockResolvedValue({ results: ["lint-tool"] });
+      const events: any[] = [];
+
+      const result = await client.agentLoopStreaming(
+        [{ role: "user", content: "lint my code" }],
+        [],
+        toolExecutor,
+        { onEvent: (e) => { events.push(e); } },
+      );
+
+      expect(result.finalContent).toBe("Found a linting skill.");
+      expect(toolExecutor).toHaveBeenCalledWith("findSkill", { query: "lint" });
+
+      // Should have tool-call and tool-result events
+      const toolCall = events.find((e) => e.type === "tool-call");
+      const toolResult = events.find((e) => e.type === "tool-result");
+      expect(toolCall).toBeDefined();
+      expect(toolCall.toolName).toBe("findSkill");
+      expect(toolResult).toBeDefined();
+
+      // Should have text-delta events from second turn
+      const textDeltas = events.filter((e) => e.type === "text-delta");
+      expect(textDeltas).toHaveLength(1);
+      expect(textDeltas[0].delta).toBe("Found a linting skill.");
+    });
+
+    it("should respect maxTurns in streaming mode", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
+        return Promise.resolve(makeStreamResponse(
+          makeChunkSSE(undefined, [{ index: 0, id: "call-x", function: { name: "findSkill", arguments: '{"query":"x"}' } }]),
+          makeChunkSSE(null, undefined, "tool_calls", { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }),
+        ));
+      }));
+
+      await client.agentLoopStreaming(
+        [{ role: "user", content: "loop" }],
+        [],
+        async () => ({ result: "ok" }),
+        { maxTurns: 3 },
+      );
+
+      expect(fetch).toHaveBeenCalledTimes(3);
+    });
+
+    it("should return same shape as agentLoop()", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+        makeStreamResponse(
+          makeChunkSSE("Answer"),
+          makeChunkSSE(null, undefined, "stop", { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15, cost: 0.01 }),
+        ),
+      ));
+
+      const result = await client.agentLoopStreaming(
+        [{ role: "user", content: "test" }],
+        [],
+        async () => ({}),
+      );
+
+      expect(result).toHaveProperty("messages");
+      expect(result).toHaveProperty("finalContent");
+      expect(result).toHaveProperty("usage");
+      expect(result.usage).toHaveProperty("totalTokens");
+      expect(result.usage).toHaveProperty("totalCost");
+      expect(result.usage).toHaveProperty("turns");
+      expect(result.usage.totalTokens).toBe(15);
+      expect(result.usage.totalCost).toBe(0.01);
+    });
+
+    it("should handle content and tool calls in the same turn", async () => {
+      let callIndex = 0;
+      vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
+        callIndex++;
+        if (callIndex === 1) {
+          // Some models emit text before tool calls
+          return Promise.resolve(makeStreamResponse(
+            makeChunkSSE("Let me search for that..."),
+            makeChunkSSE(undefined, [{ index: 0, id: "call-1", function: { name: "findSkill", arguments: '{"query":"test"}' } }]),
+            makeChunkSSE(null, undefined, "tool_calls", { prompt_tokens: 50, completion_tokens: 30, total_tokens: 80 }),
+          ));
+        }
+        return Promise.resolve(makeStreamResponse(
+          makeChunkSSE("Found it!"),
+          makeChunkSSE(null, undefined, "stop", { prompt_tokens: 80, completion_tokens: 10, total_tokens: 90 }),
+        ));
+      }));
+
+      const events: any[] = [];
+      const result = await client.agentLoopStreaming(
+        [{ role: "user", content: "test" }],
+        [],
+        async () => ({ ok: true }),
+        { onEvent: (e) => { events.push(e); } },
+      );
+
+      // Text from first turn should have been streamed
+      const firstTextDelta = events.find((e) => e.type === "text-delta" && e.delta === "Let me search for that...");
+      expect(firstTextDelta).toBeDefined();
+
+      // Tool call should have been executed
+      const toolCall = events.find((e) => e.type === "tool-call");
+      expect(toolCall).toBeDefined();
+
+      // Final answer from second turn
+      expect(result.finalContent).toBe("Found it!");
+    });
+  });
 });

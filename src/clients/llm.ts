@@ -60,6 +60,42 @@ export interface ChatCompletionResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Streaming — OpenAI-compatible SSE chunk format
+// ---------------------------------------------------------------------------
+
+export interface ChatCompletionChunk {
+  id: string;
+  object: string;
+  created: number;
+  model: string;
+  choices: {
+    index: number;
+    delta: {
+      role?: string;
+      content?: string | null;
+      tool_calls?: ToolCallDelta[];
+    };
+    finish_reason: string | null;
+  }[];
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+    cost?: number;
+  } | null;
+}
+
+export interface ToolCallDelta {
+  index: number;
+  id?: string;
+  type?: string;
+  function?: {
+    name?: string;
+    arguments?: string;
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Model metadata returned by the proxy's /v1/models endpoint
 // ---------------------------------------------------------------------------
 
@@ -210,6 +246,106 @@ export class LLMClient {
     this.metrics?.write("llm_call", { status: "ok", durationMs, tokens, cost: response.usage.cost });
 
     return response;
+  }
+
+  /**
+   * Send a streaming chat completion request to the LLM proxy.
+   * Yields ChatCompletionChunk objects as they arrive via SSE.
+   */
+  async *chatStream(
+    request: Omit<ChatCompletionRequest, "model"> & { model?: string },
+  ): AsyncGenerator<ChatCompletionChunk> {
+    const model = request.model ?? this.model;
+    const start = Date.now();
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${this.apiKey}`,
+    };
+    const requestId = this.log?.getContext().requestId;
+    if (requestId) headers["X-Request-ID"] = requestId;
+
+    const sanitizedMessages = request.messages.map((msg) => ({
+      ...msg,
+      content: msg.content ?? "",
+    }));
+
+    const body: Record<string, unknown> = {
+      model,
+      messages: sanitizedMessages,
+      temperature: request.temperature,
+      max_tokens: request.max_tokens,
+      stream: true,
+      stream_options: { include_usage: true },
+    };
+    if (request.tools?.length) {
+      body.tools = request.tools;
+    }
+    if (request.tool_choice && request.tool_choice !== "auto") {
+      body.tool_choice = request.tool_choice;
+    }
+
+    const res = await fetch(`${this.baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      const durationMs = Date.now() - start;
+      this.log?.warn("LLM streaming chat failed", { model, status: res.status, durationMs });
+      this.metrics?.write("llm_call", { status: "error", durationMs, error: `${res.status}` });
+      throw new Error(`LLM proxy request failed: ${res.status} ${text}`);
+    }
+
+    if (!res.body) {
+      throw new Error("LLM proxy returned no response body for streaming request");
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // Process complete lines
+        while (true) {
+          const lineEnd = buffer.indexOf("\n");
+          if (lineEnd === -1) break;
+
+          const line = buffer.slice(0, lineEnd).trim();
+          buffer = buffer.slice(lineEnd + 1);
+
+          if (!line || line.startsWith(":")) continue;
+          if (line === "data: [DONE]") {
+            const durationMs = Date.now() - start;
+            this.log?.debug("LLM streaming completed", { model, durationMs });
+            this.metrics?.write("llm_call", { status: "ok", durationMs, streaming: true });
+            return;
+          }
+          if (!line.startsWith("data: ")) continue;
+
+          try {
+            const chunk: ChatCompletionChunk = JSON.parse(line.slice(6));
+            yield chunk;
+          } catch {
+            this.log?.debug("Skipping unparseable SSE chunk", { line });
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    const durationMs = Date.now() - start;
+    this.log?.debug("LLM streaming completed (stream ended)", { model, durationMs });
+    this.metrics?.write("llm_call", { status: "ok", durationMs, streaming: true });
   }
 
   /**
@@ -479,6 +615,173 @@ export class LLMClient {
 
     // If we hit maxTurns, return what we have
     this.log?.warn("Agent loop hit maxTurns", { maxTurns, totalMessages: allMessages.length });
+    const lastAssistant = allMessages.filter((m) => m.role === "assistant").pop();
+    return { messages: allMessages, finalContent: lastAssistant?.content ?? "", usage };
+  }
+
+  /**
+   * Streaming variant of agentLoop: streams LLM tokens to the client via onEvent
+   * as they arrive, instead of buffering the full response per turn.
+   *
+   * Same signature and return type as agentLoop().
+   */
+  async agentLoopStreaming(
+    messages: ChatMessage[],
+    tools: ToolDefinition[],
+    toolExecutor: (name: string, args: Record<string, unknown>) => Promise<unknown>,
+    options: { model?: string; maxTurns?: number; temperature?: number; maxTokens?: number; onEvent?: OnStreamEvent } = {},
+  ): Promise<{ messages: ChatMessage[]; finalContent: string; usage: AgentLoopUsage }> {
+    const maxTurns = options.maxTurns ?? 10;
+    const allMessages = [...messages];
+    const usage: AgentLoopUsage = { totalTokens: 0, totalCost: 0, turns: [] };
+
+    for (let turn = 0; turn < maxTurns; turn++) {
+      let contentAccumulator = "";
+      const toolCallAccumulators = new Map<number, { id: string; name: string; arguments: string }>();
+      let finishReason = "stop";
+      let turnUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number; cost?: number } | undefined;
+      let textStarted = false;
+      const textId = `text_${turn}_${crypto.randomUUID().slice(0, 8)}`;
+
+      for await (const chunk of this.chatStream({
+        model: options.model,
+        messages: allMessages,
+        tools,
+        tool_choice: "auto",
+        temperature: options.temperature ?? 0.2,
+        max_tokens: options.maxTokens ?? 4096,
+      })) {
+        const choice = chunk.choices[0];
+        if (!choice) continue;
+
+        // Stream content deltas to client
+        if (choice.delta.content) {
+          if (!textStarted) {
+            await options.onEvent?.({ type: "text-start", id: textId });
+            textStarted = true;
+          }
+          contentAccumulator += choice.delta.content;
+          await options.onEvent?.({ type: "text-delta", id: textId, delta: choice.delta.content });
+        }
+
+        // Accumulate tool call deltas
+        if (choice.delta.tool_calls) {
+          for (const tc of choice.delta.tool_calls) {
+            const existing = toolCallAccumulators.get(tc.index);
+            if (!existing) {
+              toolCallAccumulators.set(tc.index, {
+                id: tc.id ?? "",
+                name: tc.function?.name ?? "",
+                arguments: tc.function?.arguments ?? "",
+              });
+            } else {
+              if (tc.id) existing.id = tc.id;
+              if (tc.function?.name) existing.name = tc.function.name;
+              if (tc.function?.arguments) existing.arguments += tc.function.arguments;
+            }
+          }
+        }
+
+        // Capture usage (typically in the final chunk)
+        if (chunk.usage) {
+          turnUsage = chunk.usage;
+        }
+
+        // Capture finish reason
+        if (choice.finish_reason) {
+          finishReason = choice.finish_reason;
+        }
+      }
+
+      // Close text stream if it was opened
+      if (textStarted) {
+        await options.onEvent?.({ type: "text-end", id: textId });
+      }
+
+      // Track usage for this turn
+      const turnTokens = turnUsage?.total_tokens ?? 0;
+      const turnCost = turnUsage?.cost;
+      usage.totalTokens += turnTokens;
+      if (turnCost) usage.totalCost += turnCost;
+
+      // Build complete tool calls from accumulated deltas
+      const assembledToolCalls: ToolCall[] = [];
+      for (const [, tc] of toolCallAccumulators) {
+        const validated = this.validateToolCall(
+          { id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } },
+          turn,
+        );
+        if (validated) assembledToolCalls.push(validated);
+      }
+
+      // Build the assistant message for conversation history
+      const assistantMessage: ChatMessage = {
+        role: "assistant",
+        content: contentAccumulator || null,
+        ...(assembledToolCalls.length > 0 ? { tool_calls: assembledToolCalls } : {}),
+      };
+      allMessages.push(assistantMessage);
+
+      // If no tool calls, we're done
+      const hasToolCalls = this.isToolCallFinishReason(finishReason) && assembledToolCalls.length > 0;
+      if (!hasToolCalls) {
+        usage.turns.push({ turn, tokens: turnTokens, cost: turnCost, toolCalls: [] });
+        this.log?.debug("Streaming agent loop completed", { turn, totalMessages: allMessages.length });
+        return { messages: allMessages, finalContent: contentAccumulator, usage };
+      }
+
+      // Execute tool calls
+      const toolCallNames = assembledToolCalls.map((tc) => tc.function.name);
+      usage.turns.push({ turn, tokens: turnTokens, cost: turnCost, toolCalls: toolCallNames });
+
+      this.log?.debug("Processing tool calls (streaming)", {
+        turn,
+        tools: toolCallNames,
+        messageCount: allMessages.length,
+      });
+
+      for (let i = 0; i < assembledToolCalls.length; i++) {
+        const toolCall = assembledToolCalls[i];
+        const toolCallId = toolCall.id || `tc_${turn}_${i}`;
+
+        let parsedArgs: Record<string, unknown> = {};
+        try {
+          parsedArgs = JSON.parse(toolCall.function.arguments);
+        } catch {
+          // keep empty args
+        }
+
+        await options.onEvent?.({
+          type: "tool-call",
+          toolCallId,
+          toolName: toolCall.function.name,
+          args: parsedArgs,
+        });
+
+        let toolResult: unknown;
+        try {
+          toolResult = await toolExecutor(toolCall.function.name, parsedArgs);
+        } catch (err) {
+          toolResult = { error: err instanceof Error ? err.message : String(err) };
+        }
+
+        await options.onEvent?.({
+          type: "tool-result",
+          toolCallId,
+          result: toolResult,
+        });
+
+        allMessages.push({
+          role: "tool",
+          tool_call_id: toolCall.id,
+          name: toolCall.function.name,
+          content: JSON.stringify(toolResult),
+        });
+      }
+    }
+
+    // If we hit maxTurns, return what we have
+    this.log?.warn("Streaming agent loop hit maxTurns", { maxTurns, totalMessages: allMessages.length });
     const lastAssistant = allMessages.filter((m) => m.role === "assistant").pop();
     return { messages: allMessages, finalContent: lastAssistant?.content ?? "", usage };
   }

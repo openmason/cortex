@@ -359,14 +359,10 @@ export class SupervisorAgent {
       convState.messages,
     );
 
-    const planTextId = `text_${crypto.randomUUID().slice(0, 8)}`;
-    await onEvent({ type: "text-start", id: planTextId });
-    await onEvent({ type: "text-delta", id: planTextId, delta: `Planning: ${request.prompt}` });
-
     const toolModel = request.model ?? await this.llm.getToolCallModel();
     let agentResult: { messages: ChatMessage[]; finalContent: string; usage: AgentLoopUsage };
     try {
-      agentResult = await this.llm.agentLoop(
+      agentResult = await this.llm.agentLoopStreaming(
         messages,
         tools,
         (name, args) => toolExecutor.execute(name, args, executionCtx),
@@ -374,7 +370,6 @@ export class SupervisorAgent {
       );
     } catch (err) {
       const errorMsg = `LLM planning failed: ${err instanceof Error ? err.message : String(err)}`;
-      await onEvent({ type: "text-end", id: planTextId });
       await onEvent({ type: "error", errorText: errorMsg });
       await onEvent({ type: "finish", finishReason: "error" });
       return {
@@ -384,8 +379,6 @@ export class SupervisorAgent {
         conversationId,
       };
     }
-
-    await onEvent({ type: "text-end", id: planTextId });
 
     // --- Conversation: persist updated history ---
     const newMessages = this.conversations.extractPersistableMessages(agentResult.messages);
@@ -409,12 +402,7 @@ export class SupervisorAgent {
     const plan = this.extractPlanFromMessages(agentResult.messages, toolExecutor, tenant);
 
     if (!plan) {
-      const summaryTextId = `text_${crypto.randomUUID().slice(0, 8)}`;
-      if (agentResult.finalContent) {
-        await onEvent({ type: "text-start", id: summaryTextId });
-        await onEvent({ type: "text-delta", id: summaryTextId, delta: agentResult.finalContent });
-        await onEvent({ type: "text-end", id: summaryTextId });
-      }
+      // Text was already streamed token-by-token via agentLoopStreaming()
       await onEvent({ type: "finish", finishReason: "stop", usage: { totalTokens: agentResult.usage.totalTokens } });
       return {
         workflowId: crypto.randomUUID(),

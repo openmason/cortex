@@ -18,6 +18,58 @@ vi.mock("../../src/db/repository", () => ({
 import app from "../../src/index";
 import type { Env } from "../../src/types";
 
+// ---------------------------------------------------------------------------
+// SSE streaming helpers — build mock streaming responses for chatStream()
+// ---------------------------------------------------------------------------
+
+function makeChunkSSE(
+  content?: string | null,
+  toolCalls?: Array<{ index: number; id?: string; type?: string; function?: { name?: string; arguments?: string } }>,
+  finishReason?: string | null,
+  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number; cost?: number },
+): string {
+  const chunk = {
+    id: "chatcmpl-stream-1",
+    object: "chat.completion.chunk",
+    created: Date.now(),
+    model: "test-model",
+    choices: [{
+      index: 0,
+      delta: {
+        ...(content !== undefined ? { content } : {}),
+        ...(toolCalls ? { tool_calls: toolCalls } : {}),
+      },
+      finish_reason: finishReason ?? null,
+    }],
+    ...(usage ? { usage } : {}),
+  };
+  return `data: ${JSON.stringify(chunk)}`;
+}
+
+function makeSSEBody(...sseLines: string[]): ReadableStream {
+  const encoder = new TextEncoder();
+  return new ReadableStream({
+    start(controller) {
+      for (const line of sseLines) {
+        controller.enqueue(encoder.encode(line + "\n\n"));
+      }
+      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      controller.close();
+    },
+  });
+}
+
+function mockStreamResponse(content: string, usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }) {
+  return {
+    ok: true,
+    body: makeSSEBody(
+      makeChunkSSE(content),
+      makeChunkSSE(null, undefined, "stop", usage ?? { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }),
+    ),
+    headers: { get: () => null },
+  };
+}
+
 const TEST_API_KEY = "ctx_testapikey1234567890abcdef";
 
 function makeMockEnv(): Env {
@@ -204,26 +256,10 @@ describe("POST /v1/chat", () => {
   });
 
   it("should return SSE content type with AI SDK header", async () => {
-    // Mock LLM: single turn, direct response
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({
-        id: "chatcmpl-1",
-        object: "chat.completion",
-        created: Date.now(),
-        model: "test-model",
-        choices: [{
-          index: 0,
-          message: {
-            role: "assistant",
-            content: "Hello! How can I help?",
-            tool_calls: undefined,
-          },
-          finish_reason: "stop",
-        }],
-        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
-      }),
-    }));
+    // Mock LLM: single turn, streaming response
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      mockStreamResponse("Hello! How can I help?"),
+    ));
 
     const res = await app.fetch(
       new Request("http://localhost/v1/chat", {
@@ -254,21 +290,9 @@ describe("POST /v1/chat", () => {
   });
 
   it("should emit conversation data part with conversationId", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({
-        id: "chatcmpl-1",
-        object: "chat.completion",
-        created: Date.now(),
-        model: "test-model",
-        choices: [{
-          index: 0,
-          message: { role: "assistant", content: "Hi!", tool_calls: undefined },
-          finish_reason: "stop",
-        }],
-        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
-      }),
-    }));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      mockStreamResponse("Hi!"),
+    ));
 
     const res = await app.fetch(
       new Request("http://localhost/v1/chat", {
@@ -304,21 +328,7 @@ describe("POST /v1/chat", () => {
       if (opts?.body) {
         try { capturedBody = JSON.parse(opts.body); } catch { /* ignore */ }
       }
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve({
-          id: "chatcmpl-1",
-          object: "chat.completion",
-          created: Date.now(),
-          model: "test-model",
-          choices: [{
-            index: 0,
-            message: { role: "assistant", content: "Done.", tool_calls: undefined },
-            finish_reason: "stop",
-          }],
-          usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
-        }),
-      });
+      return Promise.resolve(mockStreamResponse("Done."));
     }));
 
     const res = await app.fetch(
@@ -359,21 +369,7 @@ describe("POST /v1/chat", () => {
       if (opts?.body) {
         try { capturedBody = JSON.parse(opts.body); } catch { /* ignore */ }
       }
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve({
-          id: "chatcmpl-1",
-          object: "chat.completion",
-          created: Date.now(),
-          model: "test-model",
-          choices: [{
-            index: 0,
-            message: { role: "assistant", content: "Response.", tool_calls: undefined },
-            finish_reason: "stop",
-          }],
-          usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
-        }),
-      });
+      return Promise.resolve(mockStreamResponse("Response."));
     }));
 
     const res = await app.fetch(
@@ -403,21 +399,9 @@ describe("POST /v1/chat", () => {
   });
 
   it("should pass conversationId from request", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({
-        id: "chatcmpl-1",
-        object: "chat.completion",
-        created: Date.now(),
-        model: "test-model",
-        choices: [{
-          index: 0,
-          message: { role: "assistant", content: "Hi!", tool_calls: undefined },
-          finish_reason: "stop",
-        }],
-        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
-      }),
-    }));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      mockStreamResponse("Hi!"),
+    ));
 
     const convId = "conv_00000000-0000-0000-0000-000000000001";
 
@@ -474,50 +458,40 @@ describe("POST /v1/chat", () => {
     };
 
     let fetchCallIndex = 0;
-    vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string) => {
       fetchCallIndex++;
-      // Call 1: LLM chat — calls findSkill
-      if (fetchCallIndex === 1) {
+
+      const isLLMCall = typeof url === "string" && url.includes("/v1/chat/completions");
+
+      // Call 1: LLM streaming — calls findSkill
+      if (fetchCallIndex === 1 && isLLMCall) {
         return Promise.resolve({
           ok: true,
-          json: () => Promise.resolve({
-            id: "chatcmpl-1", object: "chat.completion", created: Date.now(),
-            model: "test-model",
-            choices: [{
-              index: 0,
-              message: {
-                role: "assistant", content: null,
-                tool_calls: [{
-                  id: "call-1", type: "function",
-                  function: { name: "findSkill", arguments: JSON.stringify({ query: "test" }) },
-                }],
-              },
-              finish_reason: "tool_calls",
-            }],
-            usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
-          }),
+          body: makeSSEBody(
+            makeChunkSSE(undefined, [{
+              index: 0, id: "call-1", type: "function",
+              function: { name: "findSkill", arguments: JSON.stringify({ query: "test" }) },
+            }]),
+            makeChunkSSE(null, undefined, "tool_calls", { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }),
+          ),
+          headers: { get: () => null },
         });
       }
-      // Call 2: Runics search
-      if (fetchCallIndex === 2) {
+      // Call 2: Runics search (non-streaming JSON)
+      if (fetchCallIndex === 2 && !isLLMCall) {
         return Promise.resolve({
           ok: true,
           json: () => Promise.resolve(runicsSearchResult),
         });
       }
-      // Call 3: LLM final response
+      // Call 3: LLM streaming — final response
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve({
-          id: "chatcmpl-2", object: "chat.completion", created: Date.now(),
-          model: "test-model",
-          choices: [{
-            index: 0,
-            message: { role: "assistant", content: "Found a skill for you.", tool_calls: undefined },
-            finish_reason: "stop",
-          }],
-          usage: { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 },
-        }),
+        body: makeSSEBody(
+          makeChunkSSE("Found a skill for you."),
+          makeChunkSSE(null, undefined, "stop", { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 }),
+        ),
+        headers: { get: () => null },
       });
     }));
 

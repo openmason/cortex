@@ -18,6 +18,47 @@ vi.mock("../../src/db/repository", () => ({
 import app from "../../src/index";
 import type { Env } from "../../src/types";
 
+// ---------------------------------------------------------------------------
+// SSE streaming helpers — build mock streaming responses for chatStream()
+// ---------------------------------------------------------------------------
+
+function makeChunkSSE(
+  content?: string | null,
+  toolCalls?: Array<{ index: number; id?: string; type?: string; function?: { name?: string; arguments?: string } }>,
+  finishReason?: string | null,
+  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number; cost?: number },
+): string {
+  const chunk = {
+    id: "chatcmpl-stream-1",
+    object: "chat.completion.chunk",
+    created: Date.now(),
+    model: "test-model",
+    choices: [{
+      index: 0,
+      delta: {
+        ...(content !== undefined ? { content } : {}),
+        ...(toolCalls ? { tool_calls: toolCalls } : {}),
+      },
+      finish_reason: finishReason ?? null,
+    }],
+    ...(usage ? { usage } : {}),
+  };
+  return `data: ${JSON.stringify(chunk)}`;
+}
+
+function makeSSEBody(...sseLines: string[]): ReadableStream {
+  const encoder = new TextEncoder();
+  return new ReadableStream({
+    start(controller) {
+      for (const line of sseLines) {
+        controller.enqueue(encoder.encode(line + "\n\n"));
+      }
+      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      controller.close();
+    },
+  });
+}
+
 const TEST_API_KEY = "ctx_testapikey1234567890abcdef";
 
 function makeMockEnv(): Env {
@@ -143,21 +184,14 @@ describe("POST /v1/run/stream", () => {
   });
 
   it("should emit conversation data part with conversationId", async () => {
-    // Mock LLM: single turn, direct response
+    // Mock LLM: streaming response with single text delta
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
       ok: true,
-      json: () => Promise.resolve({
-        id: "chatcmpl-1",
-        object: "chat.completion",
-        created: Date.now(),
-        model: "test-model",
-        choices: [{
-          index: 0,
-          message: { role: "assistant", content: "Hi!", tool_calls: undefined },
-          finish_reason: "stop",
-        }],
-        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
-      }),
+      body: makeSSEBody(
+        makeChunkSSE("Hi!"),
+        makeChunkSSE(null, undefined, "stop", { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }),
+      ),
+      headers: { get: () => null },
     }));
 
     const res = await app.fetch(
@@ -190,25 +224,14 @@ describe("POST /v1/run/stream", () => {
   });
 
   it("should return SSE content type with AI SDK header and stream events", async () => {
-    // Mock LLM: single turn, no tool calls (direct response)
+    // Mock LLM: streaming response
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
       ok: true,
-      json: () => Promise.resolve({
-        id: "chatcmpl-1",
-        object: "chat.completion",
-        created: Date.now(),
-        model: "test-model",
-        choices: [{
-          index: 0,
-          message: {
-            role: "assistant",
-            content: "I'll help you with that.",
-            tool_calls: undefined,
-          },
-          finish_reason: "stop",
-        }],
-        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
-      }),
+      body: makeSSEBody(
+        makeChunkSSE("I'll help you with that."),
+        makeChunkSSE(null, undefined, "stop", { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }),
+      ),
+      headers: { get: () => null },
     }));
 
     const res = await app.fetch(
@@ -253,50 +276,41 @@ describe("POST /v1/run/stream", () => {
     };
 
     let fetchCallIndex = 0;
-    vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string, init?: RequestInit) => {
       fetchCallIndex++;
-      // Call 1: LLM chat — calls findSkill
-      if (fetchCallIndex === 1) {
+
+      // Detect LLM streaming calls (to /v1/chat/completions with stream:true in body)
+      const isLLMCall = typeof url === "string" && url.includes("/v1/chat/completions");
+
+      // Call 1: LLM streaming — calls findSkill
+      if (fetchCallIndex === 1 && isLLMCall) {
         return Promise.resolve({
           ok: true,
-          json: () => Promise.resolve({
-            id: "chatcmpl-1", object: "chat.completion", created: Date.now(),
-            model: "test-model",
-            choices: [{
-              index: 0,
-              message: {
-                role: "assistant", content: null,
-                tool_calls: [{
-                  id: "call-1", type: "function",
-                  function: { name: "findSkill", arguments: JSON.stringify({ query: "test" }) },
-                }],
-              },
-              finish_reason: "tool_calls",
-            }],
-            usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
-          }),
+          body: makeSSEBody(
+            makeChunkSSE(undefined, [{
+              index: 0, id: "call-1", type: "function",
+              function: { name: "findSkill", arguments: JSON.stringify({ query: "test" }) },
+            }]),
+            makeChunkSSE(null, undefined, "tool_calls", { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }),
+          ),
+          headers: { get: () => null },
         });
       }
-      // Call 2: Runics search
-      if (fetchCallIndex === 2) {
+      // Call 2: Runics search (non-streaming JSON)
+      if (fetchCallIndex === 2 && !isLLMCall) {
         return Promise.resolve({
           ok: true,
           json: () => Promise.resolve(runicsSearchResult),
         });
       }
-      // Call 3: LLM final response
+      // Call 3: LLM streaming — final response
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve({
-          id: "chatcmpl-2", object: "chat.completion", created: Date.now(),
-          model: "test-model",
-          choices: [{
-            index: 0,
-            message: { role: "assistant", content: "Found a skill for you.", tool_calls: undefined },
-            finish_reason: "stop",
-          }],
-          usage: { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 },
-        }),
+        body: makeSSEBody(
+          makeChunkSSE("Found a skill for you."),
+          makeChunkSSE(null, undefined, "stop", { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 }),
+        ),
+        headers: { get: () => null },
       });
     }));
 
@@ -318,7 +332,6 @@ describe("POST /v1/run/stream", () => {
     const parts = parseStreamParts(text);
     const types = parts.map((p) => p.type);
 
-    expect(types).toContain("text-start");
     expect(types).toContain("tool-call");
     expect(types).toContain("tool-result");
     expect(types).toContain("finish");
@@ -327,5 +340,39 @@ describe("POST /v1/run/stream", () => {
     const toolCallPart = parts.find((p) => p.type === "tool-call") as any;
     expect(toolCallPart.toolName).toBe("findSkill");
     expect(toolCallPart.toolCallId).toBeDefined();
+  });
+
+  it("should emit multiple text-delta events (token-level streaming)", async () => {
+    // Mock LLM: streaming response with multiple tokens
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      body: makeSSEBody(
+        makeChunkSSE("I"),
+        makeChunkSSE(" can"),
+        makeChunkSSE(" help"),
+        makeChunkSSE(" you."),
+        makeChunkSSE(null, undefined, "stop", { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 }),
+      ),
+      headers: { get: () => null },
+    }));
+
+    const res = await app.fetch(
+      new Request("http://localhost/v1/run/stream", {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: "help me", product: "bombastic" }),
+      }),
+      env,
+      ctx,
+    );
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const parts = parseStreamParts(text);
+
+    const textDeltas = parts.filter((p) => p.type === "text-delta");
+    // Should have MULTIPLE text-delta events (token-level), not one big chunk
+    expect(textDeltas.length).toBeGreaterThanOrEqual(4);
+    expect(textDeltas.map((d) => d.delta).join("")).toBe("I can help you.");
   });
 });
