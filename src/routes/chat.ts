@@ -31,10 +31,8 @@ const chatSchema = z.object({
       }),
     )
     .min(1),
-  conversationId: z
-    .string()
-    .regex(/^conv_[0-9a-f-]{36}$/, "Invalid conversationId format")
-    .optional(),
+  conversationId: z.string().min(1).max(200).optional(),
+  context: z.record(z.unknown()).optional(),
   model: z.string().max(100).optional(),
 });
 
@@ -70,6 +68,7 @@ app.post("/chat", async (c) => {
     userId: parsed.data.userId ?? c.get("userId"),
     product: parsed.data.productId,
     conversationId: parsed.data.conversationId,
+    context: parsed.data.context,
     model: parsed.data.model,
   };
 

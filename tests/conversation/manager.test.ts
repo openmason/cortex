@@ -236,7 +236,7 @@ describe("ConversationManager", () => {
       expect(result[3]).toEqual({ role: "user", content: "follow up" });
     });
 
-    it("should append context after user message", () => {
+    it("should merge context into system prompt", () => {
       const result = manager.buildMessagesWithHistory(
         "System prompt",
         "Do something",
@@ -244,10 +244,10 @@ describe("ConversationManager", () => {
         [],
       );
 
-      expect(result).toHaveLength(3);
-      expect(result[2].role).toBe("user");
-      expect(result[2].content).toContain("Additional context:");
-      expect(result[2].content).toContain('"key": "value"');
+      expect(result).toHaveLength(2);
+      expect(result[0].role).toBe("system");
+      expect(result[0].content).toContain("## Context");
+      expect(result[0].content).toContain('"key": "value"');
     });
 
     it("should not add context message for empty context", () => {

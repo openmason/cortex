@@ -16,7 +16,7 @@ import { LLMClient, type ChatMessage, type AgentLoopUsage } from "../clients/llm
 import { WorkflowEngine } from "../workflow/engine";
 import { PolicyEngine } from "../policy/engine";
 import { ConversationManager, type ConversationState } from "../conversation/manager";
-import { getProductConfig } from "./product-configs";
+import { getProductConfig, resolveModel } from "./product-configs";
 import { ToolExecutor, getToolsForProduct } from "./tools";
 import type { Logger } from "../observability/logger";
 import type { Metrics } from "../observability/metrics";
@@ -119,7 +119,8 @@ export class SupervisorAgent {
     );
 
     // Run the agentic loop — the LLM will call findSkill, checkPolicy, buildPlan, etc.
-    const toolModel = request.model ?? await this.llm.getToolCallModel();
+    const defaultModel = await this.llm.getToolCallModel();
+    const toolModel = resolveModel(request.model, defaultModel);
     let agentResult: { messages: ChatMessage[]; finalContent: string; usage: AgentLoopUsage };
     try {
       agentResult = await this.llm.agentLoop(
@@ -347,7 +348,7 @@ export class SupervisorAgent {
       data: [{ type: "conversation", conversationId, isNew: !request.conversationId, turnCount: convState.turnCount }],
     });
 
-    const toolExecutor = new ToolExecutor(this.env, tenant, this.llm, this.log?.child({ module: "tools" }), this.metrics);
+    const toolExecutor = new ToolExecutor(this.env, tenant, this.llm, this.log?.child({ module: "tools" }), this.metrics, onEvent);
     const tools = getToolsForProduct(request.product);
 
     // Build messages with conversation history
@@ -359,7 +360,8 @@ export class SupervisorAgent {
       convState.messages,
     );
 
-    const toolModel = request.model ?? await this.llm.getToolCallModel();
+    const defaultModel = await this.llm.getToolCallModel();
+    const toolModel = resolveModel(request.model, defaultModel);
     let agentResult: { messages: ChatMessage[]; finalContent: string; usage: AgentLoopUsage };
     try {
       agentResult = await this.llm.agentLoopStreaming(

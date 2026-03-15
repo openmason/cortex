@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { getProductConfig, PRODUCT_CONFIGS } from "../../src/agents/product-configs";
+import { getProductConfig, PRODUCT_CONFIGS, resolveModel, MODEL_ALIASES } from "../../src/agents/product-configs";
 
 describe("Product Configs", () => {
   describe("getProductConfig", () => {
@@ -61,6 +61,36 @@ describe("Product Configs", () => {
       for (const key of Object.keys(PRODUCT_CONFIGS)) {
         expect(PRODUCT_CONFIGS[key].systemPrompt).toContain("findSkill");
       }
+    });
+
+    it("bombastic should mention emitDecomposition in system prompt", () => {
+      expect(PRODUCT_CONFIGS.bombastic.systemPrompt).toContain("emitDecomposition");
+    });
+
+    it("bombastic should use Clove identity", () => {
+      expect(PRODUCT_CONFIGS.bombastic.systemPrompt).toContain("Clove");
+    });
+  });
+
+  describe("resolveModel", () => {
+    it("should resolve known aliases to proxy model IDs", () => {
+      expect(resolveModel("claude-sonnet", "fallback")).toBe("cognium/claude-sonnet-latest");
+      expect(resolveModel("claude-haiku", "fallback")).toBe("cognium/claude-haiku-latest");
+      expect(resolveModel("claude-opus", "fallback")).toBe("cognium/claude-opus-latest");
+    });
+
+    it("should return fallback when model is undefined", () => {
+      expect(resolveModel(undefined, "cognium/gpt-oss-120b")).toBe("cognium/gpt-oss-120b");
+    });
+
+    it("should pass through unknown model names as-is", () => {
+      expect(resolveModel("cognium/custom-model", "fallback")).toBe("cognium/custom-model");
+    });
+
+    it("should have entries for all three Claude tiers", () => {
+      expect(MODEL_ALIASES).toHaveProperty("claude-sonnet");
+      expect(MODEL_ALIASES).toHaveProperty("claude-haiku");
+      expect(MODEL_ALIASES).toHaveProperty("claude-opus");
     });
   });
 });

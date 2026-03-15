@@ -1,6 +1,6 @@
 import type { ToolDefinition } from "../clients/llm";
 import type { LLMClient } from "../clients/llm";
-import type { Env, FindSkillResponse, SkillReference, TenantContext } from "../types";
+import type { Env, FindSkillResponse, SkillReference, TenantContext, OnStreamEvent } from "../types";
 import { RunicsClient } from "../clients/runics";
 import { CogniumClient } from "../clients/cognium";
 import { PolicyEngine } from "../policy/engine";
@@ -120,6 +120,40 @@ export const TOOL_BUILD_PLAN: ToolDefinition = {
   },
 };
 
+export const TOOL_EMIT_DECOMPOSITION: ToolDefinition = {
+  type: "function",
+  function: {
+    name: "emitDecomposition",
+    description:
+      "Emit a structured task decomposition to the client. Call this when you break a user's request " +
+      "into discrete steps. The client will display these steps as a checklist.",
+    parameters: {
+      type: "object",
+      properties: {
+        steps: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              title: {
+                type: "string",
+                description: "Short title of the step",
+              },
+              requires_approval: {
+                type: "boolean",
+                description: "Whether this step has side effects requiring user approval",
+              },
+            },
+            required: ["title"],
+          },
+          description: "Ordered list of steps the task decomposes into",
+        },
+      },
+      required: ["steps"],
+    },
+  },
+};
+
 export const TOOL_INVOKE_SKILL: ToolDefinition = {
   type: "function",
   function: {
@@ -155,7 +189,7 @@ export const TOOL_INVOKE_SKILL: ToolDefinition = {
 export function getToolsForProduct(product: string): ToolDefinition[] {
   switch (product) {
     case "bombastic":
-      return [TOOL_FIND_SKILL, TOOL_BUILD_PLAN, TOOL_INVOKE_SKILL];
+      return [TOOL_FIND_SKILL, TOOL_BUILD_PLAN, TOOL_INVOKE_SKILL, TOOL_EMIT_DECOMPOSITION];
     case "costaff":
       return [TOOL_FIND_SKILL, TOOL_CHECK_POLICY, TOOL_BUILD_PLAN, TOOL_INVOKE_SKILL];
     case "controlcenter":
@@ -187,6 +221,7 @@ export class ToolExecutor {
     llm?: LLMClient,
     log?: Logger,
     metrics?: Metrics,
+    private onEvent?: OnStreamEvent,
   ) {
     this.runics = new RunicsClient(env);
     this.cognium = new CogniumClient();
@@ -211,6 +246,8 @@ export class ToolExecutor {
         return this.handleBuildPlan(args);
       case "invokeSkill":
         return this.handleInvokeSkill(args, executionCtx);
+      case "emitDecomposition":
+        return this.handleEmitDecomposition(args);
       default:
         return { error: `Unknown tool: ${name}` };
     }
@@ -226,6 +263,24 @@ export class ToolExecutor {
   // -----------------------------------------------------------------------
   // Tool Handlers
   // -----------------------------------------------------------------------
+
+  private async handleEmitDecomposition(args: Record<string, unknown>): Promise<unknown> {
+    const steps = (args.steps as Array<{ title: string; requires_approval?: boolean }>).map((s) => ({
+      title: s.title,
+      status: "pending" as const,
+      requires_approval: s.requires_approval ?? false,
+    }));
+
+    // Emit decomposition data part to the client stream
+    if (this.onEvent) {
+      await this.onEvent({
+        type: "data",
+        data: [{ type: "decomposition", steps }],
+      });
+    }
+
+    return { emitted: true, stepCount: steps.length };
+  }
 
   private async handleFindSkill(args: Record<string, unknown>): Promise<unknown> {
     let response: FindSkillResponse;

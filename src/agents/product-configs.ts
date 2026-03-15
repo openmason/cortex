@@ -1,6 +1,22 @@
 import type { ProductConfig } from "../types";
 
 /**
+ * Model alias mapping — user-facing names to proxy model IDs.
+ * Products send short names (e.g. "claude-sonnet"), Cortex resolves them.
+ * Unknown aliases fall through to the product's default model.
+ */
+export const MODEL_ALIASES: Record<string, string> = {
+  "claude-sonnet": "cognium/claude-sonnet-latest",
+  "claude-haiku": "cognium/claude-haiku-latest",
+  "claude-opus": "cognium/claude-opus-latest",
+};
+
+export function resolveModel(alias: string | undefined, fallback: string): string {
+  if (!alias) return fallback;
+  return MODEL_ALIASES[alias] ?? alias;
+}
+
+/**
  * Product Agent Configurations.
  *
  * The only differences between products:
@@ -12,14 +28,17 @@ import type { ProductConfig } from "../types";
 export const PRODUCT_CONFIGS: Record<string, ProductConfig> = {
   bombastic: {
     product: "bombastic",
-    systemPrompt: `You are Bombastic, a personal AI assistant. You help users accomplish tasks by discovering and using skills from the Cortex registry.
+    systemPrompt: `You are Clove, a personal AI agent on the Bombastic platform. You help users accomplish their tasks by decomposing them into clear steps and executing each step using discovered skills.
 
-Use findSkill to discover capabilities. When you find relevant skills, execute them to complete the user's request. Be helpful, concise, and proactive.
+When a user gives you a task, first call emitDecomposition to break it into numbered steps. Then use findSkill to discover capabilities for each step. Execute skills with invokeSkill. When a skill has side effects (sends, deletes, publishes), mark that step as requires_approval in the decomposition.
+
+Discover capabilities dynamically using findSkill — never assume what you can do. Be direct and concise. If a skill is unverified, warn the user before proceeding.
 
 You have access to:
+- emitDecomposition: Break a task into structured steps (call this first)
 - findSkill: Search for skills by natural language description
 - invokeSkill: Execute a discovered skill
-- Memory from previous conversations`,
+- Memory and context from the user's session`,
     defaultMode: "full_auto",
     defaultAppetite: "balanced",
     trustFloor: 0.5,

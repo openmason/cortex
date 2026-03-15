@@ -524,4 +524,105 @@ describe("POST /v1/chat", () => {
     expect(toolCallPart.toolName).toBe("findSkill");
     expect(toolCallPart.toolCallId).toBeDefined();
   });
+
+  it("should accept free-form conversationId for per-todo scoping", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      mockStreamResponse("Got it!"),
+    ));
+
+    const res = await app.fetch(
+      new Request("http://localhost/v1/chat", {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({
+          productId: "bombastic",
+          conversationId: "todo:abc123",
+          messages: [
+            { role: "user", parts: [{ type: "text", text: "hello" }] },
+          ],
+        }),
+      }),
+      env,
+      ctx,
+    );
+
+    // Free-form conversationId should not be rejected (no UUID regex)
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const parts = parseStreamParts(text);
+    const types = parts.map((p) => p.type);
+    expect(types).toContain("finish");
+  });
+
+  it("should accept context object and pass it through", async () => {
+    let capturedBody: any;
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((_url: string, opts: any) => {
+      if (opts?.body) {
+        try { capturedBody = JSON.parse(opts.body); } catch { /* ignore */ }
+      }
+      return Promise.resolve(mockStreamResponse("I see your context."));
+    }));
+
+    const res = await app.fetch(
+      new Request("http://localhost/v1/chat", {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({
+          productId: "bombastic",
+          messages: [
+            { role: "user", parts: [{ type: "text", text: "plan my day" }] },
+          ],
+          context: {
+            todoList: [{ title: "Buy groceries", status: "pending" }],
+            userMemory: { name: "Sara", relation: "sister" },
+          },
+        }),
+      }),
+      env,
+      ctx,
+    );
+
+    expect(res.status).toBe(200);
+    await res.text();
+
+    // Context should be merged into the system prompt, not as a separate user message
+    expect(capturedBody).toBeDefined();
+    const systemMsg = capturedBody.messages.find((m: any) => m.role === "system");
+    expect(systemMsg.content).toContain("Context");
+    expect(systemMsg.content).toContain("Buy groceries");
+    expect(systemMsg.content).toContain("Sara");
+  });
+
+  it("should accept model field for per-request model selection", async () => {
+    let capturedBody: any;
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((_url: string, opts: any) => {
+      if (opts?.body) {
+        try { capturedBody = JSON.parse(opts.body); } catch { /* ignore */ }
+      }
+      return Promise.resolve(mockStreamResponse("Using haiku."));
+    }));
+
+    const res = await app.fetch(
+      new Request("http://localhost/v1/chat", {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({
+          productId: "bombastic",
+          model: "claude-haiku",
+          messages: [
+            { role: "user", parts: [{ type: "text", text: "quick question" }] },
+          ],
+        }),
+      }),
+      env,
+      ctx,
+    );
+
+    expect(res.status).toBe(200);
+    await res.text();
+
+    // Model alias should be resolved to proxy model ID
+    expect(capturedBody).toBeDefined();
+    expect(capturedBody.model).toBe("cognium/claude-haiku-latest");
+  });
 });

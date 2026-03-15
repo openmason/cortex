@@ -146,21 +146,20 @@ export class ConversationManager {
     context: Record<string, unknown> | undefined,
     history: ChatMessage[],
   ): ChatMessage[] {
+    // Merge context into system prompt so it shapes agent behavior from the start
+    let fullSystemPrompt = systemPrompt;
+    if (context && Object.keys(context).length > 0) {
+      fullSystemPrompt += `\n\n## Context\n${JSON.stringify(context, null, 2)}`;
+    }
+
     const messages: ChatMessage[] = [
-      { role: "system", content: systemPrompt },
+      { role: "system", content: fullSystemPrompt },
     ];
 
     const trimmedHistory = this.trimHistory(history);
     messages.push(...trimmedHistory);
 
     messages.push({ role: "user", content: currentPrompt });
-
-    if (context && Object.keys(context).length > 0) {
-      messages.push({
-        role: "user",
-        content: `Additional context:\n${JSON.stringify(context, null, 2)}`,
-      });
-    }
 
     return messages;
   }

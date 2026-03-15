@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { ToolExecutor, getToolsForProduct, TOOL_FIND_SKILL, TOOL_CHECK_POLICY, TOOL_BUILD_PLAN, TOOL_INVOKE_SKILL } from "../../src/agents/tools";
+import { ToolExecutor, getToolsForProduct, TOOL_FIND_SKILL, TOOL_CHECK_POLICY, TOOL_BUILD_PLAN, TOOL_INVOKE_SKILL, TOOL_EMIT_DECOMPOSITION } from "../../src/agents/tools";
 import type { Env, TenantContext } from "../../src/types";
 
 function makeMockEnv(): Env {
@@ -39,13 +39,14 @@ const makeTenant = (product = "bombastic"): TenantContext => ({
 });
 
 describe("getToolsForProduct", () => {
-  it("should return 3 tools for bombastic (no checkPolicy)", () => {
+  it("should return 4 tools for bombastic (no checkPolicy, has emitDecomposition)", () => {
     const tools = getToolsForProduct("bombastic");
-    expect(tools).toHaveLength(3);
+    expect(tools).toHaveLength(4);
     const names = tools.map((t) => t.function.name);
     expect(names).toContain("findSkill");
     expect(names).toContain("buildPlan");
     expect(names).toContain("invokeSkill");
+    expect(names).toContain("emitDecomposition");
     expect(names).not.toContain("checkPolicy");
   });
 
@@ -81,6 +82,12 @@ describe("Tool definitions", () => {
   it("should have valid JSON schema for invokeSkill", () => {
     expect(TOOL_INVOKE_SKILL.function.parameters.required).toContain("skillId");
     expect(TOOL_INVOKE_SKILL.function.parameters.required).toContain("input");
+  });
+
+  it("should have valid JSON schema for emitDecomposition", () => {
+    expect(TOOL_EMIT_DECOMPOSITION.type).toBe("function");
+    expect(TOOL_EMIT_DECOMPOSITION.function.name).toBe("emitDecomposition");
+    expect(TOOL_EMIT_DECOMPOSITION.function.parameters.required).toContain("steps");
   });
 });
 
@@ -243,6 +250,57 @@ describe("ToolExecutor", () => {
       expect(result.success).toBe(true);
       expect(result.output).toEqual({ data: "success" });
       expect(result.layer).toBe("mcp-remote");
+    });
+  });
+
+  describe("emitDecomposition", () => {
+    it("should emit decomposition data part via onEvent", async () => {
+      const events: any[] = [];
+      const onEvent = vi.fn(async (event: any) => { events.push(event); });
+      const execWithEvent = new ToolExecutor(env, makeTenant(), undefined, undefined, undefined, onEvent);
+
+      const result = await execWithEvent.execute("emitDecomposition", {
+        steps: [
+          { title: "Pick a date", requires_approval: false },
+          { title: "Send invitations", requires_approval: true },
+        ],
+      }) as any;
+
+      expect(result.emitted).toBe(true);
+      expect(result.stepCount).toBe(2);
+
+      // Verify the data part was emitted
+      expect(onEvent).toHaveBeenCalledOnce();
+      const emitted = events[0];
+      expect(emitted.type).toBe("data");
+      expect(emitted.data).toHaveLength(1);
+      expect(emitted.data[0].type).toBe("decomposition");
+      expect(emitted.data[0].steps).toHaveLength(2);
+      expect(emitted.data[0].steps[0]).toEqual({ title: "Pick a date", status: "pending", requires_approval: false });
+      expect(emitted.data[0].steps[1]).toEqual({ title: "Send invitations", status: "pending", requires_approval: true });
+    });
+
+    it("should default requires_approval to false", async () => {
+      const onEvent = vi.fn(async () => {});
+      const execWithEvent = new ToolExecutor(env, makeTenant(), undefined, undefined, undefined, onEvent);
+
+      const result = await execWithEvent.execute("emitDecomposition", {
+        steps: [{ title: "Research options" }],
+      }) as any;
+
+      expect(result.emitted).toBe(true);
+      const emitted = onEvent.mock.calls[0][0] as any;
+      expect(emitted.data[0].steps[0].requires_approval).toBe(false);
+    });
+
+    it("should work without onEvent (no-op)", async () => {
+      // Executor without onEvent — should not throw
+      const result = await executor.execute("emitDecomposition", {
+        steps: [{ title: "Step 1" }],
+      }) as any;
+
+      expect(result.emitted).toBe(true);
+      expect(result.stepCount).toBe(1);
     });
   });
 
