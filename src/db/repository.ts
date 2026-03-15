@@ -1,6 +1,6 @@
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
-import { eq, and, desc, isNull } from "drizzle-orm";
+import { eq, and, desc, isNull, like, gte, lte, type SQL } from "drizzle-orm";
 import type { Env, WorkflowState, WorkflowPlan, ExecutionResult, ApiKeyData } from "../types";
 import { workflowSessions, workflowStepExecutions, executionTraces, tenantPolicies, apiKeys } from "./schema";
 import type { TenantPolicy } from "../policy/engine";
@@ -41,6 +41,7 @@ export class WorkflowRepository {
         mode: state.mode,
         status: state.status,
         prompt,
+        conversationId: state.conversationId ?? null,
         planJson: state.plan,
         currentStepIndex: state.currentStepIndex,
         startedAt: new Date(state.startedAt),
@@ -216,16 +217,45 @@ export class WorkflowRepository {
   }
 
   /**
-   * List sessions for a tenant, with optional filters and pagination.
+   * List sessions for a tenant, with optional SQL-pushed filters and pagination.
    */
   async listSessions(
     tenantId: string,
-    filters?: { status?: string; product?: string },
+    filters?: {
+      status?: string;
+      product?: string;
+      conversationId?: string;
+      promptSearch?: string;
+      from?: string;
+      to?: string;
+    },
     limit = 20,
     offset = 0,
   ) {
     try {
-      let query = this.db
+      // Build WHERE conditions dynamically
+      const conditions: SQL[] = [eq(workflowSessions.tenantId, tenantId)];
+
+      if (filters?.status) {
+        conditions.push(eq(workflowSessions.status, filters.status));
+      }
+      if (filters?.product) {
+        conditions.push(eq(workflowSessions.product, filters.product));
+      }
+      if (filters?.conversationId) {
+        conditions.push(eq(workflowSessions.conversationId, filters.conversationId));
+      }
+      if (filters?.promptSearch) {
+        conditions.push(like(workflowSessions.prompt, `%${filters.promptSearch}%`));
+      }
+      if (filters?.from) {
+        conditions.push(gte(workflowSessions.createdAt, new Date(filters.from)));
+      }
+      if (filters?.to) {
+        conditions.push(lte(workflowSessions.createdAt, new Date(filters.to)));
+      }
+
+      const rows = await this.db
         .select({
           id: workflowSessions.id,
           tenantId: workflowSessions.tenantId,
@@ -234,6 +264,7 @@ export class WorkflowRepository {
           mode: workflowSessions.mode,
           status: workflowSessions.status,
           prompt: workflowSessions.prompt,
+          conversationId: workflowSessions.conversationId,
           currentStepIndex: workflowSessions.currentStepIndex,
           summary: workflowSessions.summary,
           error: workflowSessions.error,
@@ -242,23 +273,12 @@ export class WorkflowRepository {
           createdAt: workflowSessions.createdAt,
         })
         .from(workflowSessions)
-        .where(eq(workflowSessions.tenantId, tenantId))
+        .where(and(...conditions))
         .orderBy(desc(workflowSessions.createdAt))
         .limit(limit)
         .offset(offset);
 
-      const rows = await query;
-
-      // Apply filters in-memory (simpler than dynamic where chaining)
-      let filtered = rows;
-      if (filters?.status) {
-        filtered = filtered.filter((r) => r.status === filters.status);
-      }
-      if (filters?.product) {
-        filtered = filtered.filter((r) => r.product === filters.product);
-      }
-
-      return filtered;
+      return rows;
     } catch (err) {
       this.log?.error("Failed to list sessions", { error: err instanceof Error ? err.message : String(err), tenantId });
       return [];

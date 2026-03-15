@@ -3,9 +3,10 @@
 > **Purpose:** Single source of truth for Runics: search, sync pipelines, publish API, lifecycle management, and implementation spec for Claude Code.
 > **Parent doc:** `cortex-specification.md`
 > **Stack:** TypeScript · Cloudflare Workers · Neon Postgres (pgvector) · Workers AI · KV · R2 · Queues · Hyperdrive
-> **Date:** March 2026 · v5.0
+> **Date:** March 2026 · v5.1
 > **Status:** DECIDED — measure-first, provider-abstracted. Sprint 3a in progress.
 > **v5.0 changes:** Status lifecycle (vulnerable/revoked/degraded), version ranking by trust×usage, Circle-IR async scanning, composite trust formula, human-distilled source.
+> **v5.1 changes:** ControlCenter renamed to ControlDeck (controldeck.dev). Product appetite defaults documented inline. Cortex API session config drives all search filter parameters — Runics does not set product defaults independently. Company: Cognium Labs.
 
 ---
 
@@ -532,6 +533,19 @@ export function appetiteToTrustThreshold(appetite: Appetite): number {
   }
 }
 ```
+
+### Product Defaults
+
+Runics does not set appetite defaults directly. The Cortex API session config (see `cortex-specification.md` §23) passes appetite and filter parameters per request. These are the canonical defaults per product:
+
+| Product | Domain | Appetite | Min Trust | Allow Vulnerable |
+|---|---|---|---|---|
+| **Bombastic** | bombastic.one | `balanced` | 0.50 | `true` |
+| **CoStaff** | costaff.app | `cautious` | 0.70 | `false` |
+| **ControlDeck** | controldeck.dev | `cautious` | 0.70 | `false` (configurable per partner tenant) |
+| **External SaaS** | customer domain | configurable | configurable | configurable |
+
+All four are passed into `SearchFilters` at query time — Runics applies them uniformly regardless of which product made the request.
 
 ---
 
@@ -2369,4 +2383,4 @@ timon-security-review
 
 ---
 
-*End of document. This is the single source of truth for Runics search implementation.*
+*End of document. This is the single source of truth for Runics search implementation. — Cognium Labs*

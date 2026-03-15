@@ -57,11 +57,11 @@ DAYTONA_TARGET = "us"
 DAYTONA_API_URL = "https://app.daytona.io/api"
 LLMPROXY_URL = "https://llmproxy.xus.one"
 LLM_MODEL = "cognium/gpt-oss-120b"
-TOOL_CALL_MODEL = "cognium/gpt-oss-120b"
 DEFAULT_EXECUTION_MODE = "review_before_run"
 DEFAULT_APPETITE = "balanced"
 WORKFLOW_TIMEOUT_MS = "300000"
 MAX_SKILL_CHAIN_DEPTH = "10"
+CF_ACCOUNT_ID = "1f59f4dcd0ebb559e3c392566978d446"
 
 # --- Cron Triggers (workflow timeout sweep) ---
 [triggers]

@@ -2,10 +2,12 @@
 
 ## The Shared Agent Runtime
 
-> **Version:** 1.1 · March 2026
+> **Version:** 1.3 · March 2026
 > **Status:** Architecture decided. Runics search service in active build (Sprint 3a).
-> **Companion docs:** `runics-unified-architecture.md` · `cognium-server-specification.md` · `cognium-client-specification.md` · `forge-specification.md`
-> **Scope:** Everything between the products (Bombastic, CoStaff, ControlCenter) and the user. The complete runtime that makes AI agents work.
+> **Companion docs:** `runics-unified-architecture.md` · `cognium-server-specification.md` · `cognium-client-specification.md` · `forge-specification.md` · `bombastic-specification.md`
+> **Scope:** Everything between the products (Bombastic, CoStaff, ControlDeck) and the user. The complete runtime that makes AI agents work.
+> **v1.2 changes:** ControlCenter renamed to ControlDeck (controldeck.dev). Cortex API upgraded with AI SDK Data Stream Protocol for AIChatAgent compatibility. Multi-product config shape added. Bombastic thin-wrapper pattern documented.
+> **v1.3 changes:** Bombastic agent renamed to Clove. Product defaults resolved server-side by `productId` (products send identity only). Approval timeout added (`approvalTimeoutMs`). Approval signal flow generalized (product-agnostic — no channel dependency). BombasticAgent example updated with error handling and auth headers.
 
 ---
 
@@ -38,10 +40,10 @@
 
 ## 1. What Cortex Is
 
-Cortex is the shared agent runtime that powers every product on the platform. It sits between what users see (Bombastic, CoStaff, ControlCenter, future products) and the underlying infrastructure (Cloudflare, Neon, Daytona). Products are thin configuration layers on top of Cortex. The intelligence, execution, security, and learning all live here.
+Cortex is the shared agent runtime that powers every product on the platform. It sits between what users see (Bombastic, CoStaff, ControlDeck, future products) and the underlying infrastructure (Cloudflare, Neon, Daytona). Products are thin configuration layers on top of Cortex. The intelligence, execution, security, and learning all live here.
 
 ```
-Products:     Bombastic · CoStaff · ControlCenter · (future)
+Products:     Bombastic · CoStaff · ControlDeck · (future SaaS)
                               │
                     ┌─────────┴──────────┐
                     │      CORTEX        │  ← the shared agent runtime
@@ -59,7 +61,7 @@ Infrastructure:    Cloudflare · Neon · Workers AI
 
 The whole platform boils down to one sentence: **An LLM orchestrator that discovers, evaluates, and executes reusable skills through natural language.**
 
-**ControlCenter** is the B2B and partner-facing product built on Cortex. It exposes the full platform capability — workflow authoring, skill composition, human review gates, and the save-as-skill loop — to business operators and integration partners. Where Bombastic is personal and CoStaff is departmental, ControlCenter is the autonomous improvement infrastructure layer.
+**ControlDeck** (controldeck.dev) is the B2B and partner-facing product built on Cortex. It exposes the full platform capability — workflow authoring, skill composition, human review gates, and the save-as-skill loop — to business operators and integration partners. Where Bombastic is personal and CoStaff is departmental, ControlDeck is the autonomous improvement infrastructure layer.
 
 ---
 
@@ -70,7 +72,7 @@ The whole platform boils down to one sentence: **An LLM orchestrator that discov
 │                              PRODUCTS                                    │
 │                                                                          │
 │   ┌────────────┐  ┌────────────┐  ┌─────────────────────────────┐       │
-│   │ Bombastic  │  │  CoStaff   │  │      ControlCenter          │       │
+│   │ Bombastic  │  │  CoStaff   │  │      ControlDeck            │       │
 │   │ Personal   │  │ Business   │  │ B2B / Partner Platform      │       │
 │   │ assistant  │  │ automation │  │ Workflow authoring +        │       │
 │   │            │  │ + policies │  │ Skill composition +         │       │
@@ -126,7 +128,7 @@ The whole platform boils down to one sentence: **An LLM orchestrator that discov
 
 **Layered execution minimizes cost.** Route 65% of skill executions to zero-cost paths (remote MCP, LLM instructions), 20% to near-zero-cost Workers, and only 15% to containers.
 
-**Human in the loop is a first-class feature.** Workflows can pause before execution for human plan review, modification, and approval. This is especially important for ControlCenter's B2B and partner use cases.
+**Human in the loop is a first-class feature.** Workflows can pause before execution for human plan review, modification, and approval. This is especially important for ControlDeck's B2B and partner use cases.
 
 ---
 
@@ -151,7 +153,7 @@ Mastra is the supervisor brain. Every user request becomes a Mastra agent sessio
 
 ### Pause / Resume for Human Review
 
-Mastra's durable execution (Cloudflare Durable Objects) supports pause/resume natively. Cortex uses this for human review gates — critical for ControlCenter workflows where operators want to approve plans before execution.
+Mastra's durable execution (Cloudflare Durable Objects) supports pause/resume natively. Cortex uses this for human review gates — critical for ControlDeck workflows where operators want to approve plans before execution.
 
 ```typescript
 // Step 1: supervisor plans the workflow
@@ -183,7 +185,7 @@ const executeStep = new Step({
 | Mode | Behaviour | Default For |
 |---|---|---|
 | **Full auto** | Plans and executes without stopping | Recurring / trusted workflows |
-| **Review before run** | Pauses after planning, resumes after approval | ControlCenter default |
+| **Review before run** | Pauses after planning, resumes after approval | ControlDeck default |
 | **Step-by-step** | Pauses after every step for human confirmation | High-stakes workflows |
 
 The mode is a policy — configurable per tenant, per workflow, or per skill category. CoStaff's policy engine can enforce review-before-run for any skill category marked as sensitive.
@@ -191,11 +193,11 @@ The mode is a policy — configurable per tenant, per workflow, or per skill cat
 ### Product Agents
 
 ```typescript
-// Bombastic — personal assistant
+// Bombastic — personal assistant (Clove agent)
 const bombastic = new Agent({
   tools: [findSkillTool, invokeSkillTool, ...mastraBuiltins],
   memory: mastraMemory,
-  instructions: "You are a personal AI assistant. Use findSkill to discover capabilities...",
+  instructions: "You are Clove, a personal AI agent. Use findSkill to discover capabilities...",
 });
 
 // CoStaff — business automation with policies
@@ -205,8 +207,8 @@ const costaff = new Agent({
   instructions: "You are a business automation agent. Check policies before executing skills.",
 });
 
-// ControlCenter — B2B / partner with human review gates
-const controlcenter = new Agent({
+// ControlDeck — B2B / partner with human review gates
+const controldeck = new Agent({
   tools: [findSkillTool, invokeSkillTool, checkPolicyTool, pauseForReviewTool, ...mastraBuiltins],
   memory: mastraMemory,
   instructions: "You are a business process automation platform. Plan workflows, present them for human approval, then execute.",
@@ -266,7 +268,7 @@ See `cognium-specification.md`, `cognium-server-specification.md`, and `cognium-
 
 Activepieces is the event layer. It listens for external events (webhooks, cron, email, Stripe payments, GitHub PRs) and fires Mastra workflows in response.
 
-**Example triggers for ControlCenter:**
+**Example triggers for ControlDeck:**
 
 | Trigger | Workflow |
 |---|---|
@@ -448,7 +450,7 @@ Runics surfaces the best version by default (trust × run count), not the newest
 
 ## 13. Workflow Pause & Human Review
 
-### Save-as-Skill UX (ControlCenter / CoStaff)
+### Save-as-Skill UX (ControlDeck / CoStaff)
 
 After a successful run, the platform surfaces a save prompt:
 
@@ -514,7 +516,7 @@ Week 4: Forge sees both used frequently → suggests merging into parameterized 
 ### Example: "Review this GitHub Rust repo: github.com/org/timon"
 
 ```
-1. USER PROMPT (ControlCenter)
+1. USER PROMPT (ControlDeck)
    "Review this GitHub Rust repo: github.com/org/timon"
        │
        ▼
@@ -532,7 +534,7 @@ Week 4: Forge sees both used frequently → suggests merging into parameterized 
    findSkill("static security analysis")        → semgrep-rust        trust: 0.85
        │
        ▼
-4. PAUSE FOR REVIEW (ControlCenter mode)
+4. PAUSE FOR REVIEW (ControlDeck mode)
    Plan presented to user — add/remove/reorder steps
    User removes cargo-test, adds vault-secret-scanner
    User clicks "Run"
@@ -697,7 +699,7 @@ Execution layer routing (65% L0/L1, 20% L2, 15% L3) is the primary cost lever. M
 | Sprint 3a (now) | Runics search | Eval suite hardening, threshold calibration, Phase 2 complete |
 | Sprint 4 | Cognium + Forge | Trust scoring, auto-distillation, human-distill endpoint |
 | Sprint 5 | Cortex runtime | Execution router, Mastra integration, pause/resume |
-| Sprint 6 | ControlCenter | Save-as-skill UX, partner API, composite management |
+| Sprint 6 | ControlDeck | Save-as-skill UX, partner API, composite management |
 | Sprint 7 | Scale & Polish | Versioning UI, revocation cascade, remediation messages |
 
 ---
@@ -723,4 +725,252 @@ Execution layer routing (65% L0/L1, 20% L2, 15% L3) is the primary cost lever. M
 
 ---
 
-*Cortex is the runtime. ControlCenter is the platform. Skills are the currency.*
+## 23. Cortex API — Multi-Product Interface
+
+Every product connects to Cortex through a single unified API. The product passes a config object at session creation — Cortex reads it and applies it to all downstream components automatically. This is what makes Cortex a platform, not just internal infrastructure.
+
+### Session Config Shape
+
+```typescript
+interface CortexSessionConfig {
+  // Identity
+  productId: 'bombastic' | 'costaff' | 'controldeck' | string; // string for external SaaS
+  tenantId: string | null;   // null = personal (Bombastic)
+  userId: string;
+
+  // System prompt — defines product personality
+  systemPrompt: string;
+
+  // Trust appetite — passed directly to Runics search
+  appetite: 'strict' | 'cautious' | 'balanced' | 'adventurous';
+  minTrust: number;          // 0.0–1.0
+  allowVulnerable: boolean;
+
+  // Approval behaviour
+  approvalMode: 'never' | 'side-effects-only' | 'policy-defined' | 'always';
+
+  // Feature flags
+  policyEngine: boolean;     // CoStaff, ControlDeck only
+  humanReviewGates: boolean; // ControlDeck only
+
+  // Approval timeout — auto-cancel workflow if no response
+  approvalTimeoutMs?: number; // default: none (ControlDeck). Bombastic: 1_800_000 (30 min)
+}
+```
+
+### Product Defaults
+
+```typescript
+// Bombastic — personal assistant (Clove agent)
+// Product defaults resolved server-side — Bombastic sends only productId + userId + messages
+const bombasticConfig: CortexSessionConfig = {
+  productId: 'bombastic',
+  tenantId: null,
+  systemPrompt: "You are Clove, a personal AI agent on the Bombastic platform. Discover capabilities dynamically using findSkill. Only load the skills needed for the current request. When a skill has side effects, always request approval before executing. If a skill is unverified, warn the user before proceeding. Be direct and concise.",
+  appetite: 'balanced',
+  minTrust: 0.50,
+  allowVulnerable: true,
+  approvalMode: 'side-effects-only',
+  policyEngine: false,
+  humanReviewGates: false,
+  approvalTimeoutMs: 1_800_000,    // 30 min — auto-cancel if no response
+};
+
+// CoStaff — business automation
+const costaffConfig: CortexSessionConfig = {
+  productId: 'costaff',
+  tenantId: 'company-abc',   // set per tenant
+  systemPrompt: "You are a business automation agent. Check policies before executing skills. Prefer cautious actions.",
+  appetite: 'cautious',
+  minTrust: 0.70,
+  allowVulnerable: false,
+  approvalMode: 'policy-defined',
+  policyEngine: true,
+  humanReviewGates: false,
+};
+
+// ControlDeck — B2B / partner platform
+const controldeckConfig: CortexSessionConfig = {
+  productId: 'controldeck',
+  tenantId: 'partner-xyz',   // set per partner tenant
+  systemPrompt: "You are a business process automation platform. Plan workflows, present them for human approval, then execute.",
+  appetite: 'cautious',
+  minTrust: 0.70,
+  allowVulnerable: false,
+  approvalMode: 'always',
+  policyEngine: true,
+  humanReviewGates: true,
+};
+```
+
+### What Each Config Field Controls
+
+| Field | Affects |
+|---|---|
+| `systemPrompt` | Mastra agent instructions |
+| `appetite` + `minTrust` + `allowVulnerable` | Runics search filter |
+| `approvalMode` | Whether Mastra pauses before side-effect skills |
+| `approvalTimeoutMs` | Auto-cancel paused workflow after this duration (optional) |
+| `policyEngine` | Whether CoStaff policy check runs pre-execution |
+| `humanReviewGates` | Whether plan is surfaced for review before execution |
+| `tenantId` | Runics skill visibility scope |
+
+**Server-side resolution:** Products send only `productId`, `userId`, and `messages`. Cortex looks up the full config by `productId`. This keeps products thin and prevents config drift across deployments.
+
+---
+
+## 24. Cortex API — AI SDK Data Stream Protocol
+
+Cortex's `/v1/chat` endpoint emits responses in the **AI SDK Data Stream Protocol** format. This enables AIChatAgent compatibility for all products without any product owning the LLM call directly.
+
+### Why This Matters
+
+Any product that wraps `AIChatAgent` (Bombastic, CoStaff, ControlDeck, or an external SaaS customer) gets streaming, message persistence, reconnection, and the `useAgentChat` React hook for free — because Cortex speaks the protocol those tools expect.
+
+### Stream Format
+
+Cortex emits newline-delimited chunks in the AI SDK data stream format:
+
+```
+// Text chunk
+0:"Hello, I found "
+
+// Tool call start (Runics query)
+9:{"toolCallId":"tc-1","toolName":"find-skill","args":{"query":"send email"}}
+
+// Tool result (skill found)
+a:{"toolCallId":"tc-1","result":{"slug":"email-send","trustScore":0.91,"status":"published"}}
+
+// Approval required — data part (reconcilable by id)
+2:[{"type":"approval-required","id":"appr-abc","toolCallId":"tc-1",
+    "skillName":"email-send","trustScore":0.91,
+    "payload":{"to":"john@co.com","subject":"Thursday Brief"}}]
+
+// Text continuation
+0:"I've paused to get your approval before sending."
+
+// Finish
+e:{"finishReason":"tool-calls"}
+d:{"finishReason":"tool-calls"}
+```
+
+### Approval Signal Flow
+
+When Mastra pauses a workflow (side-effect skill, policy gate, or human review gate), Cortex emits an `approval-required` data part before closing the stream. The product's `AIChatAgent` wrapper receives this and persists it to its Durable Object SQLite. How the approval is presented to the user is product-owned — Bombastic renders inline buttons in its SPA; ControlDeck shows a review panel; future products may use WhatsApp, push notifications, or other channels.
+
+```
+Mastra pauses workflow
+        │
+        ▼
+Cortex emits 2:[{type:"approval-required", id:"appr-abc", ...}]
+        │
+        ▼
+AIChatAgent DO persists to SQLite (survives refresh/hibernation)
+        │
+        ▼
+Product renders approval UI (product-owned)
+  ├── Bombastic: inline buttons in SPA at clove.run
+  ├── ControlDeck: review panel with plan editor
+  └── Future: WhatsApp buttons, push notifications, etc.
+        │
+  User approves or rejects (or timeout fires)
+        │
+  POST /approvals/appr-abc/approve (or /reject)
+        │
+  Cortex → Mastra.resume(workflowId) or Mastra.cancel(workflowId)
+        │
+  Stream resumes → completion (or cancellation message)
+```
+
+If `approvalTimeoutMs` is set in the product config, Cortex auto-cancels the paused workflow after that duration and emits a timeout data part.
+
+### Cortex Endpoint Summary
+
+```
+POST /v1/chat                    Start or continue a session, returns data stream
+POST /v1/approvals/:id/approve   Resume a paused workflow
+POST /v1/approvals/:id/reject    Cancel a paused workflow
+GET  /v1/sessions/:id/state      Current session state (for reconnect)
+GET  /health                     Service health
+```
+
+---
+
+## 25. Product Wrapper Pattern (Bombastic Example)
+
+Each product is a thin `AIChatAgent` subclass. It does not own the LLM call — it proxies to Cortex and pipes the data stream back. Products send only identity fields; Cortex resolves the full config server-side.
+
+```typescript
+// bombastic/src/agent.ts
+
+export class BombasticAgent extends AIChatAgent<Env> {
+
+  // 1. Proxy to Cortex, pipe AI SDK data stream back
+  async onChatMessage(onFinish) {
+    return createDataStreamResponse({
+      execute: async (dataStream) => {
+        try {
+          const res = await fetch(`${this.env.CORTEX_URL}/v1/chat`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${this.env.CORTEX_API_KEY}`,
+            },
+            body: JSON.stringify({
+              productId: 'bombastic',
+              userId: this.name,           // DO instance name = session ID
+              messages: this.messages,
+            }),
+          });
+
+          if (!res.ok) {
+            dataStream.writeData([{
+              type: 'error',
+              message: 'Something went wrong. Please try again.',
+            }]);
+            return;
+          }
+
+          // Pipe Cortex data stream → AIChatAgent data stream
+          await pipeDataStream(res.body, dataStream);
+        } catch (err) {
+          dataStream.writeData([{
+            type: 'error',
+            message: 'Could not reach Clove\'s brain. Please try again in a moment.',
+          }]);
+        }
+      },
+      onFinish,
+    });
+  }
+
+  // 2. Resume endpoint — called by SPA inline approval buttons
+  //    (v1.1: also called by WhatsApp webhook via Activepieces)
+  @callable()
+  async resolveApproval(approvalId: string, decision: 'approve' | 'reject') {
+    await fetch(`${this.env.CORTEX_URL}/v1/approvals/${approvalId}/${decision}`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${this.env.CORTEX_API_KEY}` },
+    });
+    await this.setState({ pendingApproval: null });
+  }
+}
+```
+
+**What this pattern gives every product:**
+- WebSocket management — free via AIChatAgent
+- Message persistence (SQLite in DO) — free via AIChatAgent
+- Stream reconnection across page refresh — free via AIChatAgent
+- `useAgentChat` React hook for web UI — free
+- Mobile v2 WebSocket client connects to same DO — no backend change needed
+- Approval state survives DO hibernation — free via needsApproval persistence
+
+**What Cortex owns:** Mastra orchestration, Runics search, Cognium trust, Forge distillation, skill execution, product config resolution.
+
+**What the product owns:** UI, approval presentation (inline buttons, WhatsApp, push, etc.), and the `@callable` resume endpoint.
+
+New products — including external SaaS customers using Cortex as a platform — follow the same pattern. Different `productId`, different UI, same runtime.
+
+---
+
+*Cortex is the runtime. Clove is the agent. ControlDeck is the platform. Skills are the currency. — Cognium Labs*

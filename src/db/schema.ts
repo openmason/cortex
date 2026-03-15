@@ -24,6 +24,7 @@ export const workflowSessions = pgTable(
     mode: text("mode").notNull().default("review_before_run"),
     status: text("status").notNull().default("planning"),
     prompt: text("prompt").notNull(),
+    conversationId: text("conversation_id"),
     planJson: jsonb("plan_json"),
     resumeData: jsonb("resume_data"),
     currentStepIndex: smallint("current_step_index").default(0),
@@ -40,6 +41,7 @@ export const workflowSessions = pgTable(
     index("idx_workflow_sessions_tenant").on(table.tenantId, table.createdAt),
     index("idx_workflow_sessions_user").on(table.userId, table.createdAt),
     index("idx_workflow_sessions_status").on(table.status),
+    index("idx_workflow_sessions_conversation").on(table.conversationId),
   ],
 );
 

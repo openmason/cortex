@@ -15,13 +15,17 @@ app.get("/", async (c) => {
   const tenantId = c.get("tenantId");
   const status = c.req.query("status");
   const product = c.req.query("product");
+  const conversationId = c.req.query("conversation_id");
+  const promptSearch = c.req.query("q");
+  const from = c.req.query("from");
+  const to = c.req.query("to");
   const limit = Math.min(parseInt(c.req.query("limit") ?? "20", 10) || 20, 100);
   const offset = parseInt(c.req.query("offset") ?? "0", 10) || 0;
 
   const repo = new WorkflowRepository(c.env);
   const sessions = await repo.listSessions(
     tenantId,
-    { status, product },
+    { status, product, conversationId, promptSearch, from, to },
     limit,
     offset,
   );

@@ -96,15 +96,14 @@ export const TOOL_BUILD_PLAN: ToolDefinition = {
                 description: "Slug of the skill",
               },
               inputMapping: {
-                type: "object",
+                type: "string",
                 description:
-                  "Input parameters for the skill. Use '$prev' to reference the output of the previous step, " +
-                  "or '$step.N' for a specific step index.",
+                  "JSON string of input parameters for the skill. Use '$prev' to reference the output of the previous step, " +
+                  "or '$step.N' for a specific step index. Example: '{\"code\": \"$prev\"}'",
               },
               onError: {
                 type: "string",
-                enum: ["fail", "skip", "retry"],
-                description: "What to do if this step fails. Default: 'fail'",
+                description: "What to do if this step fails: 'fail', 'skip', or 'retry'. Default: 'fail'",
               },
             },
             required: ["skillId", "skillSlug"],
@@ -140,8 +139,8 @@ export const TOOL_INVOKE_SKILL: ToolDefinition = {
           description: "Slug of the skill to invoke",
         },
         input: {
-          type: "object",
-          description: "Input parameters for the skill",
+          type: "string",
+          description: "JSON string of input parameters for the skill. Example: '{\"query\": \"hello\"}'",
         },
       },
       required: ["skillId", "skillSlug", "input"],
@@ -303,12 +302,19 @@ export class ToolExecutor {
     const steps = args.steps as Array<{
       skillId: string;
       skillSlug: string;
-      inputMapping?: Record<string, unknown>;
+      inputMapping?: string | Record<string, unknown>;
       onError?: string;
     }>;
 
     const planSteps = steps.map((s, i) => {
       const skill = this.discoveredSkills.get(s.skillId);
+      // inputMapping may arrive as JSON string or object
+      let mapping: Record<string, unknown> = {};
+      if (typeof s.inputMapping === "string") {
+        try { mapping = JSON.parse(s.inputMapping); } catch { /* keep empty */ }
+      } else if (s.inputMapping) {
+        mapping = s.inputMapping;
+      }
       return {
         id: crypto.randomUUID(),
         order: i,
@@ -317,7 +323,7 @@ export class ToolExecutor {
         skillFound: !!skill,
         executionLayer: skill?.executionLayer ?? "unknown",
         trustScore: skill?.trustScore ?? 0,
-        inputMapping: s.inputMapping ?? {},
+        inputMapping: mapping,
         onError: s.onError ?? "fail",
       };
     });
@@ -352,10 +358,18 @@ export class ToolExecutor {
       };
     }
 
+    // input may arrive as JSON string or object
+    let input: Record<string, unknown> = {};
+    if (typeof args.input === "string") {
+      try { input = JSON.parse(args.input); } catch { /* keep empty */ }
+    } else if (args.input) {
+      input = args.input as Record<string, unknown>;
+    }
+
     const ctx = executionCtx ?? { waitUntil: () => {} } as unknown as ExecutionContext;
     const result = await this.executionRouter.execute(
       skill,
-      (args.input as Record<string, unknown>) ?? {},
+      input,
       ctx,
     );
 

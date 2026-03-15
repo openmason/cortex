@@ -6,8 +6,11 @@ import { authMiddleware, rateLimitMiddleware, usageTrackingMiddleware } from "./
 import runRoutes from "./routes/run";
 import healthRoutes from "./routes/health";
 import adminRoutes from "./routes/admin";
+import analyticsRoutes from "./routes/analytics";
 import sessionRoutes from "./routes/sessions";
 import skillRoutes from "./routes/skills";
+import chatRoutes from "./routes/chat";
+import approvalRoutes from "./routes/approvals";
 import demoRoutes from "./routes/demo";
 import { WorkflowEngine } from "./workflow/engine";
 import { DaytonaClient } from "./clients/daytona";
@@ -49,14 +52,18 @@ app.use("/v1/*", authMiddleware);
 app.use("/v1/*", usageTrackingMiddleware);
 app.use("/v1/run", rateLimitMiddleware);
 app.use("/v1/run/*", rateLimitMiddleware);
+app.use("/v1/chat", rateLimitMiddleware);
 
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 app.route("/v1", runRoutes);
+app.route("/v1", chatRoutes);
+app.route("/v1", approvalRoutes);
 app.route("/v1/skills", skillRoutes);
 app.route("/v1/sessions", sessionRoutes);
 app.route("/admin", adminRoutes);
+app.route("/admin/analytics", analyticsRoutes);
 app.route("/demo", demoRoutes);
 app.route("/", healthRoutes);
 

@@ -1,4 +1,4 @@
-import type { Env, SSEEvent } from "../types";
+import type { Env, OnStreamEvent } from "../types";
 import type { Logger } from "../observability/logger";
 import type { Metrics } from "../observability/metrics";
 
@@ -158,13 +158,32 @@ export class LLMClient {
     const requestId = this.log?.getContext().requestId;
     if (requestId) headers["X-Request-ID"] = requestId;
 
+    // Sanitize messages for Workers AI compatibility:
+    // - Normalize content:null → "" (Workers AI rejects null content)
+    const sanitizedMessages = request.messages.map((msg) => ({
+      ...msg,
+      content: msg.content ?? "",
+    }));
+
+    // Build request body, omitting tool_choice:"auto" (Workers AI doesn't support it;
+    // models default to auto behavior when tools are present but tool_choice is absent)
+    const body: Record<string, unknown> = {
+      model,
+      messages: sanitizedMessages,
+      temperature: request.temperature,
+      max_tokens: request.max_tokens,
+    };
+    if (request.tools?.length) {
+      body.tools = request.tools;
+    }
+    if (request.tool_choice && request.tool_choice !== "auto") {
+      body.tool_choice = request.tool_choice;
+    }
+
     const res = await fetch(`${this.baseUrl}/v1/chat/completions`, {
       method: "POST",
       headers,
-      body: JSON.stringify({
-        ...request,
-        model,
-      }),
+      body: JSON.stringify(body),
     });
 
     if (!res.ok) {
@@ -254,7 +273,16 @@ export class LLMClient {
 
       // Select best tool-capable model: prefer same as default, then any capable model
       const capable = models.filter((m) => m.supports_tool_calls === true);
-      if (capable.length === 0) return override ?? this.model;
+      if (capable.length === 0) {
+        // No capable models known — trust override if set, otherwise fall back
+        // but never return a model explicitly marked as non-tool-capable
+        if (override) return override;
+        const defaultModel = models.find((m) => m.id === this.model);
+        if (defaultModel?.supports_tool_calls === false) {
+          this.log?.warn("Default model is not tool-capable and no override set", { model: this.model });
+        }
+        return this.model;
+      }
 
       // Prefer the default model if it's tool-capable
       const defaultCapable = capable.find((m) => m.id === this.model);
@@ -350,7 +378,7 @@ export class LLMClient {
     messages: ChatMessage[],
     tools: ToolDefinition[],
     toolExecutor: (name: string, args: Record<string, unknown>) => Promise<unknown>,
-    options: { model?: string; maxTurns?: number; temperature?: number; maxTokens?: number; onEvent?: (event: SSEEvent) => void | Promise<void> } = {},
+    options: { model?: string; maxTurns?: number; temperature?: number; maxTokens?: number; onEvent?: OnStreamEvent } = {},
   ): Promise<{ messages: ChatMessage[]; finalContent: string; usage: AgentLoopUsage }> {
     const maxTurns = options.maxTurns ?? 10;
     const allMessages = [...messages];
@@ -409,23 +437,35 @@ export class LLMClient {
         messageCount: allMessages.length,
       });
 
-      for (const toolCall of validToolCalls) {
+      for (let i = 0; i < validToolCalls.length; i++) {
+        const toolCall = validToolCalls[i];
+        const toolCallId = toolCall.id || `tc_${turn}_${i}`;
+
+        let parsedArgs: Record<string, unknown> = {};
+        try {
+          parsedArgs = JSON.parse(toolCall.function.arguments);
+        } catch {
+          // keep empty args
+        }
+
         await options.onEvent?.({
-          event: "tool_call",
-          data: { name: toolCall.function.name, arguments: toolCall.function.arguments, turn },
+          type: "tool-call",
+          toolCallId,
+          toolName: toolCall.function.name,
+          args: parsedArgs,
         });
 
         let toolResult: unknown;
         try {
-          const args = JSON.parse(toolCall.function.arguments);
-          toolResult = await toolExecutor(toolCall.function.name, args);
+          toolResult = await toolExecutor(toolCall.function.name, parsedArgs);
         } catch (err) {
           toolResult = { error: err instanceof Error ? err.message : String(err) };
         }
 
         await options.onEvent?.({
-          event: "tool_result",
-          data: { name: toolCall.function.name, result: toolResult as Record<string, unknown>, turn },
+          type: "tool-result",
+          toolCallId,
+          result: toolResult,
         });
 
         allMessages.push({

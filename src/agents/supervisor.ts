@@ -8,7 +8,7 @@ import type {
   SkillReference,
   RunRequest,
   RunResponse,
-  SSEEvent,
+  OnStreamEvent,
   SaveAsSkillResponse,
 } from "../types";
 import { RunicsClient } from "../clients/runics";
@@ -119,7 +119,7 @@ export class SupervisorAgent {
     );
 
     // Run the agentic loop — the LLM will call findSkill, checkPolicy, buildPlan, etc.
-    const toolModel = await this.llm.getToolCallModel();
+    const toolModel = request.model ?? await this.llm.getToolCallModel();
     let agentResult: { messages: ChatMessage[]; finalContent: string; usage: AgentLoopUsage };
     try {
       agentResult = await this.llm.agentLoop(
@@ -195,7 +195,7 @@ export class SupervisorAgent {
     }
 
     // Execute via the workflow engine
-    const state = await this.engine.start(plan, tenant, executionCtx);
+    const state = await this.engine.start(plan, tenant, executionCtx, undefined, undefined, conversationId);
 
     return this.stateToResponse(state, agentResult.finalContent, conversationId, agentResult.usage);
   }
@@ -281,19 +281,26 @@ export class SupervisorAgent {
   }
 
   /**
-   * Handle a streaming request — same logic as handleRequest but emits SSE events.
+   * Handle a streaming request — same logic as handleRequest but emits
+   * AI SDK UI Message Stream v1 events.
    */
   async handleRequestStreaming(
     request: RunRequest,
     executionCtx: ExecutionContext,
-    onEvent: (event: SSEEvent) => void | Promise<void>,
+    onEvent: OnStreamEvent,
   ): Promise<RunResponse> {
     // Check if tool calling is available; if not, fall back to direct mode
     const hasToolCalling = await this.llm.hasToolCapableModel();
     if (!hasToolCalling) {
       this.log?.info("No tool-capable model available, using direct mode (streaming)");
       const result = await this.handleRequestDirect(request, executionCtx);
-      await onEvent({ event: "done", data: { workflowId: result.workflowId, status: result.status, summary: result.summary } });
+      const textId = `text_${crypto.randomUUID().slice(0, 8)}`;
+      if (result.summary) {
+        await onEvent({ type: "text-start", id: textId });
+        await onEvent({ type: "text-delta", id: textId, delta: result.summary });
+        await onEvent({ type: "text-end", id: textId });
+      }
+      await onEvent({ type: "finish", finishReason: "stop", usage: { totalTokens: result.usage?.totalTokens ?? 0 } });
       return result;
     }
 
@@ -314,8 +321,8 @@ export class SupervisorAgent {
     if (request.conversationId) {
       const loaded = await this.conversations.load(request.tenantId, request.conversationId);
       if (!loaded) {
-        await onEvent({ event: "error", data: { message: "Conversation not found or expired." } });
-        await onEvent({ event: "done", data: { conversationId: request.conversationId } });
+        await onEvent({ type: "error", errorText: "Conversation not found or expired." });
+        await onEvent({ type: "finish", finishReason: "error" });
         return {
           workflowId: crypto.randomUUID(),
           status: "failed",
@@ -336,8 +343,8 @@ export class SupervisorAgent {
     }
 
     await onEvent({
-      event: "conversation",
-      data: { conversationId, isNew: !request.conversationId, turnCount: convState.turnCount },
+      type: "data",
+      data: [{ type: "conversation", conversationId, isNew: !request.conversationId, turnCount: convState.turnCount }],
     });
 
     const toolExecutor = new ToolExecutor(this.env, tenant, this.llm, this.log?.child({ module: "tools" }), this.metrics);
@@ -352,9 +359,11 @@ export class SupervisorAgent {
       convState.messages,
     );
 
-    await onEvent({ event: "planning", data: { prompt: request.prompt, product: request.product } });
+    const planTextId = `text_${crypto.randomUUID().slice(0, 8)}`;
+    await onEvent({ type: "text-start", id: planTextId });
+    await onEvent({ type: "text-delta", id: planTextId, delta: `Planning: ${request.prompt}` });
 
-    const toolModel = await this.llm.getToolCallModel();
+    const toolModel = request.model ?? await this.llm.getToolCallModel();
     let agentResult: { messages: ChatMessage[]; finalContent: string; usage: AgentLoopUsage };
     try {
       agentResult = await this.llm.agentLoop(
@@ -365,8 +374,9 @@ export class SupervisorAgent {
       );
     } catch (err) {
       const errorMsg = `LLM planning failed: ${err instanceof Error ? err.message : String(err)}`;
-      await onEvent({ event: "error", data: { message: errorMsg } });
-      await onEvent({ event: "done", data: { conversationId } });
+      await onEvent({ type: "text-end", id: planTextId });
+      await onEvent({ type: "error", errorText: errorMsg });
+      await onEvent({ type: "finish", finishReason: "error" });
       return {
         workflowId: crypto.randomUUID(),
         status: "failed",
@@ -374,6 +384,8 @@ export class SupervisorAgent {
         conversationId,
       };
     }
+
+    await onEvent({ type: "text-end", id: planTextId });
 
     // --- Conversation: persist updated history ---
     const newMessages = this.conversations.extractPersistableMessages(agentResult.messages);
@@ -397,7 +409,13 @@ export class SupervisorAgent {
     const plan = this.extractPlanFromMessages(agentResult.messages, toolExecutor, tenant);
 
     if (!plan) {
-      await onEvent({ event: "done", data: { summary: agentResult.finalContent, conversationId, usage: { totalTokens: agentResult.usage.totalTokens, totalCost: agentResult.usage.totalCost } } });
+      const summaryTextId = `text_${crypto.randomUUID().slice(0, 8)}`;
+      if (agentResult.finalContent) {
+        await onEvent({ type: "text-start", id: summaryTextId });
+        await onEvent({ type: "text-delta", id: summaryTextId, delta: agentResult.finalContent });
+        await onEvent({ type: "text-end", id: summaryTextId });
+      }
+      await onEvent({ type: "finish", finishReason: "stop", usage: { totalTokens: agentResult.usage.totalTokens } });
       return {
         workflowId: crypto.randomUUID(),
         status: "completed",
@@ -414,8 +432,8 @@ export class SupervisorAgent {
 
       if (!policyResult.allowed) {
         const reasons = policyResult.violations.map((v) => v.message).join("; ");
-        await onEvent({ event: "error", data: { message: `Blocked by policy: ${reasons}` } });
-        await onEvent({ event: "done", data: { conversationId } });
+        await onEvent({ type: "error", errorText: `Blocked by policy: ${reasons}` });
+        await onEvent({ type: "finish", finishReason: "error" });
         return {
           workflowId: plan.id,
           status: "failed",
@@ -432,9 +450,14 @@ export class SupervisorAgent {
     }
 
     // Execute with event callbacks
-    const state = await this.engine.start(plan, tenant, executionCtx, undefined, onEvent);
+    const state = await this.engine.start(plan, tenant, executionCtx, undefined, onEvent, conversationId);
 
-    await onEvent({ event: "done", data: { workflowId: state.workflowId, status: state.status, conversationId, usage: { totalTokens: agentResult.usage.totalTokens, totalCost: agentResult.usage.totalCost } } });
+    // Emit approval-required data part for paused workflows
+    if (state.status === "paused_for_review" || state.status === "paused_at_step") {
+      await onEvent({ type: "data", data: [{ type: "approval-required", workflowId: state.workflowId, status: state.status }] });
+    }
+
+    await onEvent({ type: "finish", finishReason: "stop", usage: { totalTokens: agentResult.usage.totalTokens } });
 
     return this.stateToResponse(state, agentResult.finalContent, conversationId, agentResult.usage);
   }

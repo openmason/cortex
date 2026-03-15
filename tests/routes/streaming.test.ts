@@ -84,30 +84,25 @@ function authHeaders(extra?: Record<string, string>): Record<string, string> {
 }
 
 /**
- * Parse SSE text into an array of { event, data } objects.
+ * Parse AI SDK Data Stream format into an array of StreamPart objects.
+ * Each line is `data: {json}` — no `event:` field.
  */
-function parseSSE(text: string): Array<{ event: string; data: string; id?: string }> {
-  const events: Array<{ event: string; data: string; id?: string }> = [];
-  const blocks = text.split("\n\n").filter(Boolean);
+function parseStreamParts(text: string): Array<Record<string, unknown>> {
+  const parts: Array<Record<string, unknown>> = [];
+  const lines = text.split("\n");
 
-  for (const block of blocks) {
-    const lines = block.split("\n");
-    let event = "";
-    let data = "";
-    let id: string | undefined;
-
-    for (const line of lines) {
-      if (line.startsWith("event: ")) event = line.slice(7);
-      else if (line.startsWith("data: ")) data = line.slice(6);
-      else if (line.startsWith("id: ")) id = line.slice(4);
-    }
-
-    if (event || data) {
-      events.push({ event, data, id });
+  for (const line of lines) {
+    if (line.startsWith("data: ")) {
+      const json = line.slice(6);
+      try {
+        parts.push(JSON.parse(json));
+      } catch {
+        // skip unparseable lines
+      }
     }
   }
 
-  return events;
+  return parts;
 }
 
 describe("POST /v1/run/stream", () => {
@@ -147,7 +142,7 @@ describe("POST /v1/run/stream", () => {
     expect(res.status).toBe(401);
   });
 
-  it("should emit conversation event with conversationId", async () => {
+  it("should emit conversation data part with conversationId", async () => {
     // Mock LLM: single turn, direct response
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
       ok: true,
@@ -177,24 +172,24 @@ describe("POST /v1/run/stream", () => {
 
     expect(res.status).toBe(200);
     const text = await res.text();
-    const events = parseSSE(text);
-    const eventTypes = events.map((e) => e.event);
+    const parts = parseStreamParts(text);
+    const types = parts.map((p) => p.type);
 
-    expect(eventTypes).toContain("conversation");
+    // Should have a "data" part containing conversation info
+    expect(types).toContain("data");
 
-    const convEvent = events.find((e) => e.event === "conversation");
-    const convData = JSON.parse(convEvent!.data);
+    const dataPart = parts.find((p) => p.type === "data") as any;
+    expect(dataPart.data).toBeDefined();
+    const convData = dataPart.data.find((d: any) => d.type === "conversation");
+    expect(convData).toBeDefined();
     expect(convData.conversationId).toMatch(/^conv_/);
     expect(convData.isNew).toBe(true);
-    expect(convData.turnCount).toBe(0);
 
-    // Done event should also include conversationId
-    const doneEvent = events.find((e) => e.event === "done");
-    const doneData = JSON.parse(doneEvent!.data);
-    expect(doneData.conversationId).toBeDefined();
+    // Should have a "finish" part
+    expect(types).toContain("finish");
   });
 
-  it("should return SSE content type and stream events", async () => {
+  it("should return SSE content type with AI SDK header and stream events", async () => {
     // Mock LLM: single turn, no tool calls (direct response)
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
       ok: true,
@@ -231,17 +226,21 @@ describe("POST /v1/run/stream", () => {
 
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/event-stream");
+    expect(res.headers.get("x-vercel-ai-ui-message-stream")).toBe("v1");
 
     const text = await res.text();
-    const events = parseSSE(text);
+    const parts = parseStreamParts(text);
+    const types = parts.map((p) => p.type);
 
-    // Should have at least planning and done events
-    const eventTypes = events.map((e) => e.event);
-    expect(eventTypes).toContain("planning");
-    expect(eventTypes).toContain("done");
+    // Should have text-start and finish events
+    expect(types).toContain("text-start");
+    expect(types).toContain("finish");
+
+    // Stream should end with : [DONE] comment
+    expect(text).toContain(": [DONE]");
   });
 
-  it("should stream tool_call and tool_result events", async () => {
+  it("should stream tool-call and tool-result events", async () => {
     const runicsSearchResult = {
       results: [{
         id: "s1", slug: "test-skill", version: "1.0.0", name: "Test",
@@ -316,21 +315,17 @@ describe("POST /v1/run/stream", () => {
 
     expect(res.status).toBe(200);
     const text = await res.text();
-    const events = parseSSE(text);
-    const eventTypes = events.map((e) => e.event);
+    const parts = parseStreamParts(text);
+    const types = parts.map((p) => p.type);
 
-    expect(eventTypes).toContain("planning");
-    expect(eventTypes).toContain("tool_call");
-    expect(eventTypes).toContain("tool_result");
-    expect(eventTypes).toContain("done");
+    expect(types).toContain("text-start");
+    expect(types).toContain("tool-call");
+    expect(types).toContain("tool-result");
+    expect(types).toContain("finish");
 
-    // Verify tool_call data contains findSkill
-    const toolCallEvent = events.find((e) => e.event === "tool_call");
-    const toolCallData = JSON.parse(toolCallEvent!.data);
-    expect(toolCallData.name).toBe("findSkill");
-
-    // Check incremental IDs
-    const ids = events.map((e) => e.id).filter(Boolean).map(Number);
-    expect(ids).toEqual(ids.sort((a, b) => a - b));
+    // Verify tool-call data contains findSkill
+    const toolCallPart = parts.find((p) => p.type === "tool-call") as any;
+    expect(toolCallPart.toolName).toBe("findSkill");
+    expect(toolCallPart.toolCallId).toBeDefined();
   });
 });

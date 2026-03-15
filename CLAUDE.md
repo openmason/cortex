@@ -33,8 +33,8 @@ Runics (registry) ──→ Cognium (internal trust/scanning)
 ## LLM Proxy
 - URL: `https://llmproxy.xus.one` (OpenAI-compatible, routed via LiteLLM → OpenRouter / Cloudflare Workers AI)
 - API Key: set as `LLMPROXY_API_KEY` secret
-- Default model (`LLM_MODEL`): `cognium/gpt-oss-120b` (free, Cloudflare Workers AI)
-- Tool call model (`TOOL_CALL_MODEL`): `cognium/gpt-oss-120b` (note: does NOT support tool calling)
+- Default model (`LLM_MODEL`): `cognium/gpt-oss-120b` (free, Cloudflare Workers AI — no tool calling)
+- Tool call model (`TOOL_CALL_MODEL`): `cognium/grok-code-latest` (Grok Code Fast 1, $0.20/$0.50 per 1M tokens — cheapest tool-capable model)
 - **Model selection**: `getToolCallModel()` queries proxy capabilities (KV-cached 5 min), selects best tool-capable model. `TOOL_CALL_MODEL` env var is an optional override.
 - **No-tool-call fallback**: `handleRequest` and `handleRequestStreaming` check `hasToolCapableModel()` first. If no tool-capable model is available, they automatically fall back to `handleRequestDirect` (Runics keyword search → execute, no LLM planning loop).
 - **Model fallback**: Proxy handles model-level fallback chains (e.g. claude-sonnet → gemini-pro on 402). No client-side retry in `agentLoop`.
@@ -43,6 +43,11 @@ Runics (registry) ──→ Cognium (internal trust/scanning)
 - **Request correlation**: Sends `X-Request-ID` on outgoing proxy calls, reads `X-Proxy-Request-ID` from responses.
 - **Cost tracking**: `usage.cost` from proxy responses written to Analytics Engine `double3` and logged per LLM call.
 - Models constant in `src/clients/llm.ts` MODELS object (11 models: 3 premium, 3 budget, 3 specialized, 2 Cloudflare)
+- **Available models** (all via OpenRouter unless noted):
+  - Premium: `claude-opus-latest` (Opus 4.6, $5/$25), `openai-gpt-latest` (GPT-5.2, $1.75/$14), `claude-sonnet-latest` (Sonnet 4.5, ~$1/$5)
+  - Budget: `grok-code-latest` (Grok Code Fast 1, $0.20/$0.50), `deepseek-latest` (V3.2, $0.24/$0.38), `claude-haiku-latest` (Haiku 4.5, $0.25/$1.25)
+  - Specialized: `gemini-pro-latest` (1M context, $2/$12), `z-ai-latest` (GLM-5, $0.30/$2.55), `minimax-m-latest` (M2.5, $0.30/$1.20)
+  - Free: `gpt-oss-120b`, `qwen-2.5-coder` (Cloudflare Workers AI, no tool calling)
 
 ## Infrastructure (Provisioned)
 - **Neon DB**: Connection string in `.dev.vars` / wrangler secret `DATABASE_URL`
@@ -156,7 +161,7 @@ When a skill has no executable bundle (no `mcpUrl`, no `skillMd`, no `r2BundleKe
 - Backward compat: old states without `timeoutAt` are never lazily timed out
 
 ## Testing
-- 410 unit tests passing across 25 test files (`npx vitest run`)
+- 423 unit tests passing across 26 test files (`npx vitest run`)
 - Local dev tested with `npx wrangler dev` — health, models, and full run request all work
 - E2E verified live: codegen pipeline working end-to-end (findSkill → invokeSkill → codegen → Daytona → result)
 - E2E smoke test: `ADMIN_SECRET=<secret> npx tsx scripts/smoke-test.ts` (9 tests against live deployment)
@@ -197,8 +202,7 @@ Master specification: `cortex-specification.md`
 
 ## Known Issues
 - **KV free-tier daily write limit** — `WORKFLOW_STATE` KV still hits the daily write cap for workflow state writes and health checks. API keys are now in Neon DB (resolved). Health check uses read-only KV check to avoid burning writes. Rate limiter and auth backfill KV writes are non-blocking (`waitUntil` + `try/catch`).
-- **gpt-oss-120b / qwen-2.5-coder no tool calling** — Workers AI models confirmed `supports_tool_calls: false` by proxy capabilities. `hasToolCapableModel()` detects this and falls back to `handleRequestDirect` (no agentic planning loop).
-- **OpenRouter models unavailable** — proxy currently only returns Cloudflare Workers AI models. When OpenRouter models are re-added, the agentic loop will automatically activate (via `hasToolCapableModel()` check).
+- **gpt-oss-120b / qwen-2.5-coder no tool calling** — Workers AI models confirmed `supports_tool_calls: false` by proxy capabilities. `hasToolCapableModel()` detects this and falls back to `handleRequestDirect` (no agentic planning loop). With OpenRouter models now available, the agentic loop is active when `TOOL_CALL_MODEL` is set to a capable model (default: `grok-code-latest`).
 
 ## Decoupling Status (Completed)
 Cognium and Forge queue integrations have been removed. What remains:
@@ -218,10 +222,40 @@ Cognium and Forge queue integrations have been removed. What remains:
 - **Per-turn usage tracking**: `ConversationState.turnMetrics` records tokens, cost, and tool calls for each LLM turn. `GET /v1/sessions/conversations/:id` returns `turnMetrics` array + aggregate `usage: { totalTokens, totalCost }`
 - **RunResponse usage**: `POST /v1/run` returns `usage: { totalTokens, totalCost }` from the agent loop
 
+## Architecture Decisions — Spec vs Reality
+
+Key differences between the spec docs (`cortex-specification.md`, `runics-unified-architecture.md`) and what's actually built. These are intentional — revisit as needed.
+
+### Mastra — Not Used (Future Integration)
+- `@mastra/core` (0.5.0) and `@mastra/cloudflare` (0.1.0) are in `package.json` but **zero imports** exist.
+- Everything Mastra would provide is custom-built: `SupervisorAgent` (agentic loop), `WorkflowEngine` (pause/resume), `ConversationManager` (memory), `WorkflowDurableObject` (durable execution).
+- Mastra's Cloudflare support was too immature at build time (v0.1.0). May revisit when it stabilizes.
+- **If adopting Mastra later**: replace SupervisorAgent with Mastra `Agent`, WorkflowEngine with Mastra `Workflow`/`Step`, and use Mastra's native pause/resume instead of KV state management.
+
+### LLM Proxy — Decided
+- All LLM calls route through `https://llmproxy.xus.one` (LiteLLM → OpenRouter / Cloudflare Workers AI). This is final.
+- The spec references direct Anthropic API calls (`Claude Sonnet`). Reality: all models are accessed through the proxy with a unified OpenAI-compatible interface.
+- Model selection, fallback chains, and format normalization are handled at the proxy layer, not in Cortex.
+
+### AI SDK Data Stream Protocol — Implemented
+- Cortex uses the **AI SDK UI Message Stream v1** (AI SDK 5+) format for all streaming endpoints.
+- Format: standard SSE `data: {json}\n\n` with `type` inside JSON. No `event:` field. Header: `x-vercel-ai-ui-message-stream: v1`. Stream ends with `: [DONE]`.
+- Types: `text-start`, `text-delta`, `text-end`, `tool-call`, `tool-result`, `step-start`, `step-finish`, `data` (custom), `error`, `finish`.
+- Custom data parts (via `{type:"data", data:[...]}`) carry `conversation`, `workflow-complete`, `approval-required`.
+
+### API Shape Drift
+- Spec says `POST /v1/chat` — reality is `POST /v1/run`
+- Spec says `POST /v1/approvals/:id/approve` — reality is `POST /v1/run/:id/resume`
+- Spec says products send only `productId + userId + messages` — reality expects `product + prompt + appetite + mode`
+- Spec says per-product `approvalTimeoutMs` — reality uses global `WORKFLOW_TIMEOUT_MS`
+
+### Activepieces — Not Started
+- Spec lists Activepieces as the event/trigger layer (webhooks, cron, email, Stripe, GitHub PRs).
+- Not integrated. Would be a separate self-hosted service ($10/mo VPS).
+
 ## Next Steps (Prioritized)
-1. Re-add OpenRouter models to proxy (enables agentic loop via `hasToolCapableModel()` auto-detection)
-2. Webhook/callback support for long-running workflows
-3. E2E test for buildPlan multi-step workflow path (live, not just unit tests)
-4. Production CORS lockdown (currently allows all origins)
-5. Token-level streaming (stream LLM tokens to client as they arrive, not just tool events)
-6. Conversation-to-session linking (add `conversationId` to `workflow_sessions` table)
+1. Webhook/callback support for long-running workflows
+2. Token-level streaming (stream LLM tokens to client as they arrive, not just tool events)
+3. Production CORS lockdown (currently allows all origins)
+4. Rate limit per API key (currently per tenant)
+5. Activepieces integration (triggers & events — webhooks, cron, email, Stripe, GitHub PRs)

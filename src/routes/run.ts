@@ -1,7 +1,7 @@
 import { Hono } from "hono";
-import { streamSSE } from "hono/streaming";
+import { stream as honoStream } from "hono/streaming";
 import { z } from "zod";
-import type { Env, AppVariables, RunRequest, WorkflowState, ResumeRequest, SSEEvent } from "../types";
+import type { Env, AppVariables, RunRequest, WorkflowState, ResumeRequest, StreamPart } from "../types";
 import { SupervisorAgent } from "../agents/supervisor";
 import { LLMClient, MODELS } from "../clients/llm";
 import { WorkflowEngine } from "../workflow/engine";
@@ -28,6 +28,7 @@ const runSchema = z.object({
   context: z.record(z.unknown()).optional(),
   conversationId: z.string().regex(/^conv_[0-9a-f-]{36}$/, "Invalid conversationId format").optional(),
   stream: z.boolean().optional(),
+  model: z.string().min(1).max(100).optional(),
 });
 
 app.post("/run", async (c) => {
@@ -47,16 +48,15 @@ app.post("/run", async (c) => {
     product: parsed.data.product ?? c.get("product"),
   };
 
-  // If streaming requested, delegate to the SSE path
+  // If streaming requested, delegate to the AI SDK Data Stream path
   if (wantsStream) {
-    return streamSSE(c, async (stream) => {
-      let eventId = 0;
-      const onEvent = async (event: SSEEvent) => {
-        await stream.writeSSE({
-          event: event.event,
-          data: JSON.stringify(event.data),
-          id: String(eventId++),
-        });
+    c.header("x-vercel-ai-ui-message-stream", "v1");
+    c.header("Content-Type", "text/event-stream");
+    c.header("Cache-Control", "no-cache");
+
+    return honoStream(c, async (stream) => {
+      const onEvent = async (part: StreamPart) => {
+        await stream.write(`data: ${JSON.stringify(part)}\n\n`);
       };
 
       try {
@@ -70,11 +70,12 @@ app.post("/run", async (c) => {
         await supervisor.handleRequestStreaming(request, c.executionCtx, onEvent);
       } catch (err) {
         await onEvent({
-          event: "error",
-          data: { message: err instanceof Error ? err.message : "Internal server error" },
+          type: "error",
+          errorText: err instanceof Error ? err.message : "Internal server error",
         });
-        await onEvent({ event: "done", data: {} });
       }
+
+      await stream.write(`: [DONE]\n\n`);
     });
   }
 
@@ -116,7 +117,7 @@ app.post("/run", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /v1/run/stream — Start a new workflow with SSE streaming
+// POST /v1/run/stream — Start a new workflow with AI SDK streaming
 // ---------------------------------------------------------------------------
 app.post("/run/stream", async (c) => {
   const body = await c.req.json();
@@ -133,14 +134,13 @@ app.post("/run/stream", async (c) => {
     product: parsed.data.product ?? c.get("product"),
   };
 
-  return streamSSE(c, async (stream) => {
-    let eventId = 0;
-    const onEvent = async (event: SSEEvent) => {
-      await stream.writeSSE({
-        event: event.event,
-        data: JSON.stringify(event.data),
-        id: String(eventId++),
-      });
+  c.header("x-vercel-ai-ui-message-stream", "v1");
+  c.header("Content-Type", "text/event-stream");
+  c.header("Cache-Control", "no-cache");
+
+  return honoStream(c, async (stream) => {
+    const onEvent = async (part: StreamPart) => {
+      await stream.write(`data: ${JSON.stringify(part)}\n\n`);
     };
 
     try {
@@ -154,11 +154,12 @@ app.post("/run/stream", async (c) => {
       await supervisor.handleRequestStreaming(request, c.executionCtx, onEvent);
     } catch (err) {
       await onEvent({
-        event: "error",
-        data: { message: err instanceof Error ? err.message : "Internal server error" },
+        type: "error",
+        errorText: err instanceof Error ? err.message : "Internal server error",
       });
-      await onEvent({ event: "done", data: {} });
     }
+
+    await stream.write(`: [DONE]\n\n`);
   });
 });
 
@@ -189,7 +190,8 @@ app.post("/run/:workflowId/resume", async (c) => {
     c.executionCtx,
   );
 
-  return c.json(response);
+  const statusCode = response.status === "failed" ? 422 : 200;
+  return c.json(response, statusCode);
 });
 
 // ---------------------------------------------------------------------------

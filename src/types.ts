@@ -42,6 +42,10 @@ export interface Env {
   LLMPROXY_URL: string;
   LLMPROXY_API_KEY: string;
 
+  // Cloudflare API (for Analytics Engine queries)
+  CF_ACCOUNT_ID?: string;
+  CF_API_TOKEN?: string;
+
   // Secrets
   DAYTONA_API_KEY: string;
   DATABASE_URL: string;
@@ -170,6 +174,7 @@ export interface WorkflowState {
   timeoutAt?: string;
   resumeData?: unknown;
   error?: string;
+  conversationId?: string;
 }
 
 export type WorkflowStatus = "planning" | "paused_for_review" | "running" | "paused_at_step" | "completed" | "failed" | "timed_out";
@@ -397,6 +402,7 @@ export interface RunRequest {
   appetite?: Appetite;
   context?: Record<string, unknown>;
   conversationId?: string;
+  model?: string;
 }
 
 export interface RunResponse {
@@ -416,20 +422,19 @@ export interface ResumeRequest {
 }
 
 // ---------------------------------------------------------------------------
-// Streaming (SSE)
+// Streaming — AI SDK UI Message Stream v1
+// https://ai-sdk.dev/docs/ai-sdk-ui/stream-protocol
 // ---------------------------------------------------------------------------
-export type SSEEventType =
-  | "conversation"
-  | "planning"
-  | "tool_call"
-  | "tool_result"
-  | "step_start"
-  | "step_complete"
-  | "workflow_complete"
-  | "error"
-  | "done";
+export type StreamPart =
+  | { type: "text-start"; id: string }
+  | { type: "text-delta"; id: string; delta: string }
+  | { type: "text-end"; id: string }
+  | { type: "tool-call"; toolCallId: string; toolName: string; args: Record<string, unknown> }
+  | { type: "tool-result"; toolCallId: string; result: unknown }
+  | { type: "step-start"; messageId: string; [key: string]: unknown }
+  | { type: "step-finish"; finishReason: string; usage?: { promptTokens?: number; completionTokens?: number }; [key: string]: unknown }
+  | { type: "data"; data: unknown[] }
+  | { type: "error"; errorText: string }
+  | { type: "finish"; finishReason: string; usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number } };
 
-export interface SSEEvent {
-  event: SSEEventType;
-  data: Record<string, unknown>;
-}
+export type OnStreamEvent = (part: StreamPart) => void | Promise<void>;

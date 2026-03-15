@@ -8,7 +8,7 @@ import type {
   ExecutionMode,
   TenantContext,
   SkillReference,
-  SSEEvent,
+  OnStreamEvent,
 } from "../types";
 import { ExecutionRouter } from "../execution/router";
 import { CogniumClient } from "../clients/cognium";
@@ -60,7 +60,8 @@ export class WorkflowEngine {
     tenant: TenantContext,
     executionCtx: ExecutionContext,
     prompt?: string,
-    onEvent?: (event: SSEEvent) => void | Promise<void>,
+    onEvent?: OnStreamEvent,
+    conversationId?: string,
   ): Promise<WorkflowState> {
     const state: WorkflowState = {
       workflowId: plan.id,
@@ -72,6 +73,7 @@ export class WorkflowEngine {
       currentStepIndex: 0,
       status: "planning",
       startedAt: new Date().toISOString(),
+      conversationId,
     };
 
     // Pre-flight: trust check all skills in the plan
@@ -148,7 +150,7 @@ export class WorkflowEngine {
   private async executeWorkflow(
     state: WorkflowState,
     executionCtx: ExecutionContext,
-    onEvent?: (event: SSEEvent) => void | Promise<void>,
+    onEvent?: OnStreamEvent,
   ): Promise<WorkflowState> {
     const resumingAtStep = state.status === "paused_at_step" ? state.currentStepIndex : -1;
     state.status = "running";
@@ -189,8 +191,11 @@ export class WorkflowEngine {
       await this.persistState(state);
 
       await onEvent?.({
-        event: "step_start",
-        data: { stepIndex: i, skillSlug: step.skill.slug, skillId: step.skill.id },
+        type: "step-start",
+        messageId: `step_${i}`,
+        stepIndex: i,
+        skillSlug: step.skill.slug,
+        skillId: step.skill.id,
       });
 
       const result = await this.executor.execute(
@@ -202,14 +207,13 @@ export class WorkflowEngine {
       step.result = result;
 
       await onEvent?.({
-        event: "step_complete",
-        data: {
-          stepIndex: i,
-          skillSlug: step.skill.slug,
-          success: result.success,
-          durationMs: result.durationMs,
-          error: result.error,
-        },
+        type: "step-finish",
+        finishReason: result.success ? "complete" : "error",
+        stepIndex: i,
+        skillSlug: step.skill.slug,
+        success: result.success,
+        durationMs: result.durationMs,
+        error: result.error,
       });
 
       // Record step execution to DB (non-blocking)
@@ -300,8 +304,8 @@ export class WorkflowEngine {
       });
 
       await onEvent?.({
-        event: "workflow_complete",
-        data: { workflowId: state.workflowId, status: state.status },
+        type: "data",
+        data: [{ type: "workflow-complete", workflowId: state.workflowId, status: state.status }],
       });
 
       // Write execution trace to DB (non-blocking)
