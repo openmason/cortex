@@ -776,9 +776,11 @@ class App {
     document.getElementById('prompt').addEventListener('keydown',e=>{
       if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); this.send() }
     });
-    // Auto-resize textarea
+    // Auto-resize textarea + update button state
+    const self = this;
     document.getElementById('prompt').addEventListener('input',function(){
       this.style.height='auto'; this.style.height=Math.min(this.scrollHeight,160)+'px';
+      self.updateBtn();
     });
 
     document.getElementById('model-indicator').addEventListener('click',()=>this.inspector.open());
@@ -789,8 +791,19 @@ class App {
 
   updateBtn(){
     const b=document.getElementById('send');
-    b.disabled = !this.api.key || this.running;
+    const hasKey = !!this.api.key;
+    const hasPrompt = !!document.getElementById('prompt').value.trim();
+    b.disabled = !hasKey || !hasPrompt || this.running;
     b.textContent = this.running ? 'Sending...' : 'Send \\u2192';
+    // Hint: pulse key input if user types prompt without key
+    const ki=document.getElementById('key');
+    if(!hasKey && hasPrompt){
+      ki.classList.add('border-cx-gold','ring-2','ring-cx-gold/20');
+      ki.placeholder='\\u2190 Enter API key first';
+    } else {
+      ki.classList.remove('border-cx-gold','ring-2','ring-cx-gold/20');
+      ki.placeholder='API key (ctx_...)';
+    }
   }
 
   async loadMeta(){
