@@ -15,22 +15,27 @@ app.use("/chat", requireScope("run"));
 // ---------------------------------------------------------------------------
 // POST /v1/chat — Clove-compatible chat endpoint (AI SDK Data Stream)
 // ---------------------------------------------------------------------------
+// Support both AI SDK parts format and simple content format
+const messageSchema = z.object({
+  role: z.enum(["user", "assistant"]),
+  // AI SDK format: parts array
+  parts: z.array(
+    z.object({
+      type: z.string(),
+      text: z.string().optional(),
+    }),
+  ).optional(),
+  // Simple format: content string
+  content: z.string().optional(),
+}).refine(
+  (m) => m.parts !== undefined || m.content !== undefined,
+  { message: "Message must have either 'parts' or 'content'" },
+);
+
 const chatSchema = z.object({
   productId: z.enum(["bombastic", "costaff", "controlcenter"]),
   userId: z.string().min(1).optional(),
-  messages: z
-    .array(
-      z.object({
-        role: z.enum(["user", "assistant"]),
-        parts: z.array(
-          z.object({
-            type: z.string(),
-            text: z.string().optional(),
-          }),
-        ),
-      }),
-    )
-    .min(1),
+  messages: z.array(messageSchema).min(1),
   conversationId: z.string().min(1).max(200).optional(),
   context: z.record(z.unknown()).optional(),
   model: z.string().max(100).optional(),
@@ -52,10 +57,16 @@ app.post("/chat", async (c) => {
     return c.json({ error: "No user message found" }, 400);
   }
 
-  const prompt = lastUserMessage.parts
-    .filter((p) => p.type === "text" && p.text)
-    .map((p) => p.text!)
-    .join("\n");
+  // Support both formats: parts array (AI SDK) or content string (simple)
+  let prompt: string;
+  if (lastUserMessage.parts) {
+    prompt = lastUserMessage.parts
+      .filter((p) => p.type === "text" && p.text)
+      .map((p) => p.text!)
+      .join("\n");
+  } else {
+    prompt = lastUserMessage.content ?? "";
+  }
 
   if (!prompt) {
     return c.json({ error: "No text content in user message" }, 400);

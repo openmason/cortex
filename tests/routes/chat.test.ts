@@ -593,6 +593,34 @@ describe("POST /v1/chat", () => {
     expect(systemMsg.content).toContain("Sara");
   });
 
+  it("should accept simple content-based messages (not just parts format)", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      mockStreamResponse("Content format works."),
+    ));
+
+    const res = await app.fetch(
+      new Request("http://localhost/v1/chat", {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({
+          productId: "bombastic",
+          messages: [
+            { role: "user", content: "hello from simple format" },
+          ],
+        }),
+      }),
+      env,
+      ctx,
+    );
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const parts = parseStreamParts(text);
+    const types = parts.map((p) => p.type);
+    expect(types).toContain("text-delta");
+    expect(types).toContain("finish");
+  });
+
   it("should accept model field for per-request model selection", async () => {
     let capturedBody: any;
     vi.stubGlobal("fetch", vi.fn().mockImplementation((_url: string, opts: any) => {

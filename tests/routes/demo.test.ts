@@ -79,10 +79,61 @@ describe("Demo Page", () => {
 
     const body = await res.text();
     expect(body).toContain("<title>Cortex Demo</title>");
-    expect(body).toContain('id="tl"');
+    expect(body).toContain('id="chat-container"');
+    expect(body).toContain('id="chat-messages"');
     expect(body).toContain('id="key"');
-    expect(body).toContain('id="go"');
-    expect(body).toContain('class="plan-viz"');
+    expect(body).toContain('id="send"');
+    expect(body).toContain('id="prompt"');
+    expect(body).toContain('id="inspector"');
+  });
+
+  it("should use Tailwind CDN", async () => {
+    const res = await app.fetch(
+      new Request("http://localhost/demo"),
+      env,
+      ctx,
+    );
+
+    const body = await res.text();
+    expect(body).toContain("cdn.tailwindcss.com");
+  });
+
+  it("should target /v1/chat endpoint", async () => {
+    const res = await app.fetch(
+      new Request("http://localhost/demo"),
+      env,
+      ctx,
+    );
+
+    const body = await res.text();
+    expect(body).toContain("/v1/chat");
+  });
+
+  it("should include product selector with all products", async () => {
+    const res = await app.fetch(
+      new Request("http://localhost/demo"),
+      env,
+      ctx,
+    );
+
+    const body = await res.text();
+    expect(body).toContain('id="product"');
+    expect(body).toContain("bombastic");
+    expect(body).toContain("costaff");
+    expect(body).toContain("controlcenter");
+  });
+
+  it("should include inspector with timeline, models, and sessions tabs", async () => {
+    const res = await app.fetch(
+      new Request("http://localhost/demo"),
+      env,
+      ctx,
+    );
+
+    const body = await res.text();
+    expect(body).toContain('data-tab="timeline"');
+    expect(body).toContain('data-tab="models"');
+    expect(body).toContain('data-tab="sessions"');
   });
 
   it("should not require authentication", async () => {
