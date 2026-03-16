@@ -110,7 +110,7 @@ export class SupervisorAgent {
     const tools = getToolsForProduct(request.product);
 
     // Build messages with conversation history
-    const systemPrompt = this.buildSystemPrompt(config.systemPrompt, tenant);
+    const systemPrompt = this.buildSystemPrompt(config.systemPrompt, tenant, request.systemInstructions);
     const messages = this.conversations.buildMessagesWithHistory(
       systemPrompt,
       request.prompt,
@@ -337,7 +337,7 @@ export class SupervisorAgent {
     const tools = getToolsForProduct(request.product);
 
     // Build messages with conversation history
-    const systemPrompt = this.buildSystemPrompt(config.systemPrompt, tenant);
+    const systemPrompt = this.buildSystemPrompt(config.systemPrompt, tenant, request.systemInstructions);
     const messages = this.conversations.buildMessagesWithHistory(
       systemPrompt,
       request.prompt,
@@ -493,8 +493,8 @@ export class SupervisorAgent {
   // Private helpers
   // -----------------------------------------------------------------------
 
-  private buildSystemPrompt(basePrompt: string, tenant: TenantContext): string {
-    return `${basePrompt}
+  private buildSystemPrompt(basePrompt: string, tenant: TenantContext, systemInstructions?: string): string {
+    let prompt = `${basePrompt}
 
 ## Current session
 - Product: ${tenant.product}
@@ -512,6 +512,12 @@ export class SupervisorAgent {
 5. If invokeSkill fails, try a different skill from the findSkill results.
 
 IMPORTANT: You must call tools to completion. Do NOT stop after findSkill — always follow up with invokeSkill or buildPlan.`;
+
+    if (systemInstructions) {
+      prompt += `\n\n## Additional Instructions (from client)\n${systemInstructions}`;
+    }
+
+    return prompt;
   }
 
   /**

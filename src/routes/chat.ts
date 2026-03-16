@@ -40,6 +40,7 @@ const chatSchema = z.object({
   sessionId: z.string().min(1).max(200).optional(), // alias for conversationId
   context: z.record(z.unknown()).optional(),
   model: z.string().max(100).optional(),
+  systemInstructions: z.string().max(5000).optional(),
 });
 
 app.post("/chat", async (c) => {
@@ -85,6 +86,7 @@ app.post("/chat", async (c) => {
     conversationId,
     context: parsed.data.context,
     model: parsed.data.model,
+    systemInstructions: parsed.data.systemInstructions,
   };
 
   // Always stream

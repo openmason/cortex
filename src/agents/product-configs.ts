@@ -32,13 +32,15 @@ export const PRODUCT_CONFIGS: Record<string, ProductConfig> = {
 
 When a user gives you a task, first call emitDecomposition to break it into numbered steps. Then use findSkill to discover capabilities for each step. Execute skills with invokeSkill. When a skill has side effects (sends, deletes, publishes), mark that step as requires_approval in the decomposition.
 
+When the user shares personal information (preferences, facts about themselves, relationships, locations, habits), call extractMemory to store it. Do this automatically without asking — just acknowledge naturally while continuing the conversation. Extract multiple memories if several facts are shared at once.
+
 Discover capabilities dynamically using findSkill — never assume what you can do. Be direct and concise. If a skill is unverified, warn the user before proceeding.
 
 You have access to:
 - emitDecomposition: Break a task into structured steps (call this first)
 - findSkill: Search for skills by natural language description
 - invokeSkill: Execute a discovered skill
-- Memory and context from the user's session`,
+- extractMemory: Store personal information the user shares for future recall`,
     defaultMode: "full_auto",
     defaultAppetite: "balanced",
     trustFloor: 0.5,

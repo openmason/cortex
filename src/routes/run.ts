@@ -29,6 +29,7 @@ const runSchema = z.object({
   conversationId: z.string().regex(/^conv_[0-9a-f-]{36}$/, "Invalid conversationId format").optional(),
   stream: z.boolean().optional(),
   model: z.string().min(1).max(100).optional(),
+  systemInstructions: z.string().max(5000).optional(),
 });
 
 app.post("/run", async (c) => {

@@ -154,6 +154,41 @@ export const TOOL_EMIT_DECOMPOSITION: ToolDefinition = {
   },
 };
 
+export const TOOL_EXTRACT_MEMORY: ToolDefinition = {
+  type: "function",
+  function: {
+    name: "extractMemory",
+    description:
+      "Extract and store a piece of personal information the user shared. " +
+      "Call this whenever the user reveals a personal preference, fact, relationship, or context " +
+      "that would be useful to remember in future conversations. Examples: name, location, " +
+      "preferences, relationships, work details, habits.",
+    parameters: {
+      type: "object",
+      properties: {
+        category: {
+          type: "string",
+          enum: ["preference", "personal_fact", "relationship", "work", "location", "habit", "other"],
+          description: "Category of the memory",
+        },
+        key: {
+          type: "string",
+          description: "Short key identifying what is being remembered (e.g. 'favorite_drink', 'boss_name', 'home_city')",
+        },
+        value: {
+          type: "string",
+          description: "The actual information to remember",
+        },
+        source: {
+          type: "string",
+          description: "The user's original statement that this was extracted from",
+        },
+      },
+      required: ["category", "key", "value"],
+    },
+  },
+};
+
 export const TOOL_INVOKE_SKILL: ToolDefinition = {
   type: "function",
   function: {
@@ -189,7 +224,7 @@ export const TOOL_INVOKE_SKILL: ToolDefinition = {
 export function getToolsForProduct(product: string): ToolDefinition[] {
   switch (product) {
     case "bombastic":
-      return [TOOL_FIND_SKILL, TOOL_BUILD_PLAN, TOOL_INVOKE_SKILL, TOOL_EMIT_DECOMPOSITION];
+      return [TOOL_FIND_SKILL, TOOL_BUILD_PLAN, TOOL_INVOKE_SKILL, TOOL_EMIT_DECOMPOSITION, TOOL_EXTRACT_MEMORY];
     case "costaff":
       return [TOOL_FIND_SKILL, TOOL_CHECK_POLICY, TOOL_BUILD_PLAN, TOOL_INVOKE_SKILL];
     case "controlcenter":
@@ -248,6 +283,8 @@ export class ToolExecutor {
         return this.handleInvokeSkill(args, executionCtx);
       case "emitDecomposition":
         return this.handleEmitDecomposition(args);
+      case "extractMemory":
+        return this.handleExtractMemory(args);
       default:
         return { error: `Unknown tool: ${name}` };
     }
@@ -280,6 +317,25 @@ export class ToolExecutor {
     }
 
     return { emitted: true, stepCount: steps.length };
+  }
+
+  private async handleExtractMemory(args: Record<string, unknown>): Promise<unknown> {
+    const memory = {
+      category: args.category as string,
+      key: args.key as string,
+      value: args.value as string,
+      source: args.source as string | undefined,
+    };
+
+    // Emit memory data part to the client stream
+    if (this.onEvent) {
+      await this.onEvent({
+        type: "data",
+        data: [{ type: "memory", ...memory }],
+      });
+    }
+
+    return { stored: true, ...memory };
   }
 
   private async handleFindSkill(args: Record<string, unknown>): Promise<unknown> {

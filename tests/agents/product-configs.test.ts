@@ -67,6 +67,10 @@ describe("Product Configs", () => {
       expect(PRODUCT_CONFIGS.bombastic.systemPrompt).toContain("emitDecomposition");
     });
 
+    it("bombastic should mention extractMemory in system prompt", () => {
+      expect(PRODUCT_CONFIGS.bombastic.systemPrompt).toContain("extractMemory");
+    });
+
     it("bombastic should use Clove identity", () => {
       expect(PRODUCT_CONFIGS.bombastic.systemPrompt).toContain("Clove");
     });

@@ -627,4 +627,39 @@ describe("POST /v1/chat", () => {
     expect(capturedBody).toBeDefined();
     expect(capturedBody.model).toBe("cognium/claude-haiku-latest");
   });
+
+  it("should pass systemInstructions into system prompt", async () => {
+    let capturedBody: any;
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((_url: string, opts: any) => {
+      if (opts?.body) {
+        try { capturedBody = JSON.parse(opts.body); } catch { /* ignore */ }
+      }
+      return Promise.resolve(mockChatResponse("I'll remember that."));
+    }));
+
+    const res = await app.fetch(
+      new Request("http://localhost/v1/chat", {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({
+          productId: "bombastic",
+          messages: [
+            { role: "user", content: "My boss is Sarah" },
+          ],
+          systemInstructions: "When the user shares personal info, call extractMemory to store it.",
+        }),
+      }),
+      env,
+      ctx,
+    );
+
+    expect(res.status).toBe(200);
+    await res.text();
+
+    // systemInstructions should be appended to system prompt
+    expect(capturedBody).toBeDefined();
+    const systemMsg = capturedBody.messages.find((m: any) => m.role === "system");
+    expect(systemMsg.content).toContain("Additional Instructions (from client)");
+    expect(systemMsg.content).toContain("extractMemory");
+  });
 });

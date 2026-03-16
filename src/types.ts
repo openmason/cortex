@@ -403,6 +403,7 @@ export interface RunRequest {
   context?: Record<string, unknown>;
   conversationId?: string;
   model?: string;
+  systemInstructions?: string;
 }
 
 export interface RunResponse {

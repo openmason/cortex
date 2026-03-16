@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { ToolExecutor, getToolsForProduct, TOOL_FIND_SKILL, TOOL_CHECK_POLICY, TOOL_BUILD_PLAN, TOOL_INVOKE_SKILL, TOOL_EMIT_DECOMPOSITION } from "../../src/agents/tools";
+import { ToolExecutor, getToolsForProduct, TOOL_FIND_SKILL, TOOL_CHECK_POLICY, TOOL_BUILD_PLAN, TOOL_INVOKE_SKILL, TOOL_EMIT_DECOMPOSITION, TOOL_EXTRACT_MEMORY } from "../../src/agents/tools";
 import type { Env, TenantContext } from "../../src/types";
 
 function makeMockEnv(): Env {
@@ -39,14 +39,15 @@ const makeTenant = (product = "bombastic"): TenantContext => ({
 });
 
 describe("getToolsForProduct", () => {
-  it("should return 4 tools for bombastic (no checkPolicy, has emitDecomposition)", () => {
+  it("should return 5 tools for bombastic (no checkPolicy, has emitDecomposition + extractMemory)", () => {
     const tools = getToolsForProduct("bombastic");
-    expect(tools).toHaveLength(4);
+    expect(tools).toHaveLength(5);
     const names = tools.map((t) => t.function.name);
     expect(names).toContain("findSkill");
     expect(names).toContain("buildPlan");
     expect(names).toContain("invokeSkill");
     expect(names).toContain("emitDecomposition");
+    expect(names).toContain("extractMemory");
     expect(names).not.toContain("checkPolicy");
   });
 
@@ -88,6 +89,14 @@ describe("Tool definitions", () => {
     expect(TOOL_EMIT_DECOMPOSITION.type).toBe("function");
     expect(TOOL_EMIT_DECOMPOSITION.function.name).toBe("emitDecomposition");
     expect(TOOL_EMIT_DECOMPOSITION.function.parameters.required).toContain("steps");
+  });
+
+  it("should have valid JSON schema for extractMemory", () => {
+    expect(TOOL_EXTRACT_MEMORY.type).toBe("function");
+    expect(TOOL_EXTRACT_MEMORY.function.name).toBe("extractMemory");
+    expect(TOOL_EXTRACT_MEMORY.function.parameters.required).toContain("category");
+    expect(TOOL_EXTRACT_MEMORY.function.parameters.required).toContain("key");
+    expect(TOOL_EXTRACT_MEMORY.function.parameters.required).toContain("value");
   });
 });
 
@@ -301,6 +310,63 @@ describe("ToolExecutor", () => {
 
       expect(result.emitted).toBe(true);
       expect(result.stepCount).toBe(1);
+    });
+  });
+
+  describe("extractMemory", () => {
+    it("should emit memory data part via onEvent", async () => {
+      const events: any[] = [];
+      const onEvent = vi.fn(async (event: any) => { events.push(event); });
+      const execWithEvent = new ToolExecutor(env, makeTenant(), undefined, undefined, undefined, onEvent);
+
+      const result = await execWithEvent.execute("extractMemory", {
+        category: "preference",
+        key: "favorite_drink",
+        value: "tea",
+        source: "I prefer tea over coffee",
+      }) as any;
+
+      expect(result.stored).toBe(true);
+      expect(result.category).toBe("preference");
+      expect(result.key).toBe("favorite_drink");
+      expect(result.value).toBe("tea");
+
+      expect(onEvent).toHaveBeenCalledOnce();
+      const emitted = events[0];
+      expect(emitted.type).toBe("data");
+      expect(emitted.data).toHaveLength(1);
+      expect(emitted.data[0].type).toBe("memory");
+      expect(emitted.data[0].category).toBe("preference");
+      expect(emitted.data[0].key).toBe("favorite_drink");
+      expect(emitted.data[0].value).toBe("tea");
+      expect(emitted.data[0].source).toBe("I prefer tea over coffee");
+    });
+
+    it("should work without source field", async () => {
+      const onEvent = vi.fn(async () => {});
+      const execWithEvent = new ToolExecutor(env, makeTenant(), undefined, undefined, undefined, onEvent);
+
+      const result = await execWithEvent.execute("extractMemory", {
+        category: "personal_fact",
+        key: "home_city",
+        value: "San Francisco",
+      }) as any;
+
+      expect(result.stored).toBe(true);
+      expect(result.value).toBe("San Francisco");
+      const emitted = onEvent.mock.calls[0][0] as any;
+      expect(emitted.data[0].source).toBeUndefined();
+    });
+
+    it("should work without onEvent (no-op)", async () => {
+      const result = await executor.execute("extractMemory", {
+        category: "relationship",
+        key: "boss_name",
+        value: "Sarah",
+      }) as any;
+
+      expect(result.stored).toBe(true);
+      expect(result.key).toBe("boss_name");
     });
   });
 
