@@ -503,15 +503,18 @@ export class SupervisorAgent {
 - Appetite: ${tenant.appetite}
 
 ## Instructions
-1. Use findSkill to search for skills that match the user's request.
-2. ${tenant.product !== "bombastic" ? "Use checkPolicy to verify each skill is allowed by the tenant's policy." : "Bombastic mode — no policy checks needed."}
-3. ALWAYS execute skills — never just describe what you would do. After findSkill returns results, you MUST either:
+1. For general questions, creative writing, explanations, or conversational requests — respond directly without using tools.
+2. For requests that require external actions, integrations, or data retrieval — use findSkill to search for matching skills.
+3. ${tenant.product !== "bombastic" ? "Use checkPolicy to verify each skill is allowed by the tenant's policy." : "Bombastic mode — no policy checks needed."}
+4. If findSkill returns results with confidence "high" or "medium", you MUST either:
    a. Call invokeSkill directly for simple single-skill tasks, OR
    b. Call buildPlan to create a multi-step execution plan.
-4. After invokeSkill completes, summarize the actual result to the user.
-5. If invokeSkill fails, try a different skill from the findSkill results.
+5. If findSkill returns "no_match" or "low_enriched" confidence, respond directly to the user's request instead of searching again.
+6. After invokeSkill completes, summarize the actual result to the user.
+7. If invokeSkill fails, try a different skill from the findSkill results.
 
-IMPORTANT: You must call tools to completion. Do NOT stop after findSkill — always follow up with invokeSkill or buildPlan.`;
+IMPORTANT: When skills are found, execute them — don't just describe what you would do.
+When NO skills match (confidence: "no_match"), respond directly to help the user.`;
 
     if (systemInstructions) {
       prompt += `\n\n## Additional Instructions (from client)\n${systemInstructions}`;

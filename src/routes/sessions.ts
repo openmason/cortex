@@ -51,6 +51,38 @@ app.get("/:id", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /v1/sessions/:id/messages — Conversation messages for a session
+// ---------------------------------------------------------------------------
+app.get("/:id/messages", async (c) => {
+  const sessionId = c.req.param("id");
+  const tenantId = c.get("tenantId");
+
+  const repo = new WorkflowRepository(c.env);
+  const detail = await repo.getSessionDetail(sessionId, tenantId);
+
+  if (!detail) {
+    return c.json({ error: "Session not found" }, 404);
+  }
+
+  if (!detail.conversationId) {
+    return c.json({ messages: [], conversationId: null });
+  }
+
+  const manager = new ConversationManager(c.env);
+  const state = await manager.load(tenantId, detail.conversationId);
+
+  if (!state) {
+    return c.json({ messages: [], conversationId: detail.conversationId, expired: true });
+  }
+
+  return c.json({
+    conversationId: state.conversationId,
+    messages: state.messages,
+    turnCount: state.turnCount,
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GET /v1/sessions/:id/trace — Execution trace for Forge
 // ---------------------------------------------------------------------------
 app.get("/:id/trace", async (c) => {

@@ -274,6 +274,120 @@ describe("Session Routes", () => {
     });
   });
 
+  describe("GET /v1/sessions/:id/messages", () => {
+    it("should return 404 when session not found", async () => {
+      mockRepo.getSessionDetail.mockResolvedValue(null);
+
+      const res = await app.fetch(
+        new Request("http://localhost/v1/sessions/nonexistent/messages", {
+          headers: authHeaders(),
+        }),
+        env,
+        ctx,
+      );
+
+      expect(res.status).toBe(404);
+    });
+
+    it("should return empty messages when session has no conversationId", async () => {
+      mockRepo.getSessionDetail.mockResolvedValue({
+        id: "s1",
+        tenantId: "t1",
+        conversationId: null,
+      });
+
+      const res = await app.fetch(
+        new Request("http://localhost/v1/sessions/s1/messages", {
+          headers: authHeaders(),
+        }),
+        env,
+        ctx,
+      );
+
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as any;
+      expect(body.messages).toEqual([]);
+      expect(body.conversationId).toBeNull();
+    });
+
+    it("should return messages from conversation KV", async () => {
+      mockRepo.getSessionDetail.mockResolvedValue({
+        id: "s1",
+        tenantId: "t1",
+        conversationId: "conv_abc123",
+      });
+
+      // Seed conversation in KV
+      const convState = {
+        conversationId: "conv_abc123",
+        tenantId: "t1",
+        userId: "u1",
+        product: "bombastic",
+        createdAt: new Date().toISOString(),
+        lastActivityAt: new Date().toISOString(),
+        turnCount: 2,
+        messages: [
+          { role: "user", content: "Hello" },
+          { role: "assistant", content: "Hi there!" },
+          { role: "user", content: "Help me" },
+          { role: "assistant", content: "Sure!" },
+        ],
+      };
+      (env.SESSION_CACHE.get as any).mockImplementation(async (key: string) => {
+        if (key === `apikey:${TEST_API_KEY}`) {
+          return JSON.stringify({
+            tenantId: "t1",
+            userId: "u1",
+            product: "bombastic",
+            scopes: ["run", "sessions"],
+            createdAt: new Date().toISOString(),
+          });
+        }
+        if (key === "conversation:t1:conv_abc123") {
+          return JSON.stringify(convState);
+        }
+        return null;
+      });
+
+      const res = await app.fetch(
+        new Request("http://localhost/v1/sessions/s1/messages", {
+          headers: authHeaders(),
+        }),
+        env,
+        ctx,
+      );
+
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as any;
+      expect(body.conversationId).toBe("conv_abc123");
+      expect(body.messages).toHaveLength(4);
+      expect(body.turnCount).toBe(2);
+    });
+
+    it("should return expired flag when conversation KV has expired", async () => {
+      mockRepo.getSessionDetail.mockResolvedValue({
+        id: "s1",
+        tenantId: "t1",
+        conversationId: "conv_expired",
+      });
+
+      // KV returns null for expired conversation
+      const res = await app.fetch(
+        new Request("http://localhost/v1/sessions/s1/messages", {
+          headers: authHeaders(),
+        }),
+        env,
+        ctx,
+      );
+
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as any;
+      expect(body.messages).toEqual([]);
+      expect(body.expired).toBe(true);
+      expect(body.conversationId).toBe("conv_expired");
+    });
+  });
+
   describe("GET /v1/sessions/:id/trace", () => {
     it("should return 404 when trace not found", async () => {
       mockRepo.getSessionTrace.mockResolvedValue(null);

@@ -198,6 +198,18 @@ export class WorkflowEngine {
         skillId: step.skill.id,
       });
 
+      // Emit stepUpdate data event for client compatibility
+      await onEvent?.({
+        type: "data",
+        data: [{
+          type: "stepUpdate",
+          stepIndex: i,
+          status: "started",
+          skillSlug: step.skill.slug,
+          skillId: step.skill.id,
+        }],
+      });
+
       const result = await this.executor.execute(
         step.skill,
         resolvedInput,
@@ -214,6 +226,19 @@ export class WorkflowEngine {
         success: result.success,
         durationMs: result.durationMs,
         error: result.error,
+      });
+
+      // Emit stepUpdate data event for client compatibility
+      await onEvent?.({
+        type: "data",
+        data: [{
+          type: "stepUpdate",
+          stepIndex: i,
+          status: result.success ? "completed" : "failed",
+          skillSlug: step.skill.slug,
+          durationMs: result.durationMs,
+          error: result.error,
+        }],
       });
 
       // Record step execution to DB (non-blocking)

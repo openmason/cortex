@@ -313,10 +313,19 @@ describe("LLMClient", () => {
     });
 
     it("should respect maxTurns limit", async () => {
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockOk(makeChatResponse(null, [{
-        id: "call-x", type: "function",
-        function: { name: "findSkill", arguments: '{"query":"x"}' },
-      }], "tool_calls"))));
+      let callCount = 0;
+      vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
+        callCount++;
+        // First 3 calls return tool calls (to hit maxTurns)
+        if (callCount <= 3) {
+          return Promise.resolve(mockOk(makeChatResponse(null, [{
+            id: `call-${callCount}`, type: "function",
+            function: { name: "findSkill", arguments: '{"query":"x"}' },
+          }], "tool_calls")));
+        }
+        // 4th call is the fallback text generation (no tools)
+        return Promise.resolve(mockOk(makeChatResponse("Fallback response")));
+      }));
 
       const result = await client.agentLoop(
         [{ role: "user", content: "loop" }],
@@ -325,8 +334,9 @@ describe("LLMClient", () => {
         { maxTurns: 3 },
       );
 
-      // Should have exactly 3 LLM calls (3 turns)
-      expect(fetch).toHaveBeenCalledTimes(3);
+      // Should have 3 turns + 1 fallback call (when no text was generated)
+      expect(fetch).toHaveBeenCalledTimes(4);
+      expect(result.finalContent).toBe("Fallback response");
     });
 
     it("should accept 'tool_call' (singular) finish_reason as safety net", async () => {
@@ -696,22 +706,37 @@ describe("LLMClient", () => {
     });
 
     it("should respect maxTurns in streaming mode", async () => {
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
-        mockOk(makeChatResponse(null, [{
-          id: "call-x",
-          type: "function",
-          function: { name: "findSkill", arguments: '{"query":"x"}' },
-        }], "tool_calls")),
-      ));
+      let callCount = 0;
+      vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
+        callCount++;
+        // First 3 calls return tool calls (to hit maxTurns)
+        if (callCount <= 3) {
+          return Promise.resolve(mockOk(makeChatResponse(null, [{
+            id: `call-${callCount}`,
+            type: "function",
+            function: { name: "findSkill", arguments: '{"query":"x"}' },
+          }], "tool_calls")));
+        }
+        // 4th call is the fallback text generation (no tools)
+        return Promise.resolve(mockOk(makeChatResponse("Fallback response")));
+      }));
 
-      await client.agentLoopStreaming(
+      const events: any[] = [];
+      const result = await client.agentLoopStreaming(
         [{ role: "user", content: "loop" }],
         [],
         async () => ({ result: "ok" }),
-        { maxTurns: 3 },
+        { maxTurns: 3, onEvent: (e) => { events.push(e); } },
       );
 
-      expect(fetch).toHaveBeenCalledTimes(3);
+      // Should have 3 turns + 1 fallback call (when no text was generated)
+      expect(fetch).toHaveBeenCalledTimes(4);
+      expect(result.finalContent).toBe("Fallback response");
+
+      // Should have emitted text events for the fallback response
+      const textDeltas = events.filter((e) => e.type === "text-delta");
+      expect(textDeltas).toHaveLength(1);
+      expect(textDeltas[0].delta).toBe("Fallback response");
     });
 
     it("should return same shape as agentLoop()", async () => {

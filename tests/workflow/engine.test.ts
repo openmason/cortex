@@ -418,6 +418,75 @@ describe("WorkflowEngine", () => {
     });
   });
 
+  describe("stepUpdate data events", () => {
+    it("should emit stepUpdate started and completed data events", async () => {
+      const events: any[] = [];
+      const onEvent = vi.fn(async (event: any) => { events.push(event); });
+
+      const plan = makePlan({ mode: "full_auto" });
+      const tenant = makeTenant({ executionMode: "full_auto" });
+
+      await engine.start(plan, tenant, ctx, undefined, onEvent);
+
+      // Find stepUpdate events
+      const stepUpdates = events.filter(
+        (e) => e.type === "data" && e.data?.[0]?.type === "stepUpdate",
+      );
+
+      expect(stepUpdates).toHaveLength(2); // started + completed
+      expect(stepUpdates[0].data[0].status).toBe("started");
+      expect(stepUpdates[0].data[0].stepIndex).toBe(0);
+      expect(stepUpdates[0].data[0].skillSlug).toBe("test-skill");
+      expect(stepUpdates[1].data[0].status).toBe("completed");
+      expect(stepUpdates[1].data[0].stepIndex).toBe(0);
+    });
+
+    it("should emit stepUpdate failed when step fails", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        text: () => Promise.resolve("Internal error"),
+      }));
+
+      const events: any[] = [];
+      const onEvent = vi.fn(async (event: any) => { events.push(event); });
+
+      const plan = makePlan({ mode: "full_auto" });
+      const tenant = makeTenant();
+
+      await engine.start(plan, tenant, ctx, undefined, onEvent);
+
+      const stepUpdates = events.filter(
+        (e) => e.type === "data" && e.data?.[0]?.type === "stepUpdate",
+      );
+
+      // started + failed
+      expect(stepUpdates).toHaveLength(2);
+      expect(stepUpdates[0].data[0].status).toBe("started");
+      expect(stepUpdates[1].data[0].status).toBe("failed");
+    });
+
+    it("should emit stepUpdate events alongside step-start and step-finish", async () => {
+      const events: any[] = [];
+      const onEvent = vi.fn(async (event: any) => { events.push(event); });
+
+      const plan = makePlan({ mode: "full_auto" });
+      const tenant = makeTenant();
+
+      await engine.start(plan, tenant, ctx, undefined, onEvent);
+
+      const types = events.map((e) =>
+        e.type === "data" ? `data:${e.data[0].type}` : e.type,
+      );
+
+      // Should see: step-start, data:stepUpdate(started), step-finish, data:stepUpdate(completed), data:workflow-complete
+      expect(types).toContain("step-start");
+      expect(types).toContain("step-finish");
+      expect(types).toContain("data:stepUpdate");
+      expect(types).toContain("data:workflow-complete");
+    });
+  });
+
   describe("codegen fallback via LLM", () => {
     function makeMockLLM(): LLMClient {
       return {

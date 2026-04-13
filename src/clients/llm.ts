@@ -613,10 +613,45 @@ export class LLMClient {
       }
     }
 
-    // If we hit maxTurns, return what we have
+    // If we hit maxTurns, check if we have any text content
     this.log?.warn("Agent loop hit maxTurns", { maxTurns, totalMessages: allMessages.length });
     const lastAssistant = allMessages.filter((m) => m.role === "assistant").pop();
-    return { messages: allMessages, finalContent: lastAssistant?.content ?? "", usage };
+    const lastContent = lastAssistant?.content ?? "";
+
+    // If no text was generated (all turns were tool calls), force a final text generation
+    if (!lastContent) {
+      this.log?.info("No text generated after maxTurns, forcing final text generation without tools");
+      try {
+        const finalResponse = await this.chat({
+          model: options.model,
+          messages: allMessages,
+          // No tools - force text generation
+          temperature: options.temperature ?? 0.2,
+          max_tokens: options.maxTokens ?? 4096,
+        });
+
+        const finalChoice = finalResponse.choices[0];
+        const finalContent = finalChoice?.message.content ?? "";
+
+        // Track final turn usage
+        const finalTokens = finalResponse.usage?.total_tokens ?? 0;
+        const finalCost = finalResponse.usage?.cost;
+        usage.totalTokens += finalTokens;
+        if (finalCost) usage.totalCost += finalCost;
+        usage.turns.push({ turn: maxTurns, tokens: finalTokens, cost: finalCost, toolCalls: [] });
+
+        if (finalChoice?.message) {
+          allMessages.push(finalChoice.message);
+        }
+
+        return { messages: allMessages, finalContent, usage };
+      } catch (err) {
+        this.log?.error("Failed to generate fallback text", { error: err instanceof Error ? err.message : String(err) });
+        return { messages: allMessages, finalContent: "", usage };
+      }
+    }
+
+    return { messages: allMessages, finalContent: lastContent, usage };
   }
 
   /**
@@ -742,9 +777,53 @@ export class LLMClient {
       }
     }
 
-    // If we hit maxTurns, return what we have
+    // If we hit maxTurns, check if we have any text content
     this.log?.warn("Streaming agent loop hit maxTurns", { maxTurns, totalMessages: allMessages.length });
     const lastAssistant = allMessages.filter((m) => m.role === "assistant").pop();
-    return { messages: allMessages, finalContent: lastAssistant?.content ?? "", usage };
+    const lastContent = lastAssistant?.content ?? "";
+
+    // If no text was generated (all turns were tool calls), force a final text generation
+    if (!lastContent) {
+      this.log?.info("No text generated after maxTurns, forcing final text generation without tools");
+      try {
+        const finalResponse = await this.chat({
+          model: options.model,
+          messages: allMessages,
+          // No tools - force text generation
+          temperature: options.temperature ?? 0.2,
+          max_tokens: options.maxTokens ?? 4096,
+        });
+
+        const finalChoice = finalResponse.choices[0];
+        const finalContent = finalChoice?.message.content ?? "";
+
+        // Track final turn usage
+        const finalTokens = finalResponse.usage?.total_tokens ?? 0;
+        const finalCost = finalResponse.usage?.cost;
+        usage.totalTokens += finalTokens;
+        if (finalCost) usage.totalCost += finalCost;
+        usage.turns.push({ turn: maxTurns, tokens: finalTokens, cost: finalCost, toolCalls: [] });
+
+        // Emit the final text as stream events
+        if (finalContent) {
+          const textId = `text_final_${crypto.randomUUID().slice(0, 8)}`;
+          await options.onEvent?.({ type: "text-start", id: textId });
+          await options.onEvent?.({ type: "text-delta", id: textId, delta: finalContent });
+          await options.onEvent?.({ type: "text-end", id: textId });
+        }
+
+        if (finalChoice?.message) {
+          allMessages.push(finalChoice.message);
+        }
+
+        return { messages: allMessages, finalContent, usage };
+      } catch (err) {
+        this.log?.error("Failed to generate fallback text", { error: err instanceof Error ? err.message : String(err) });
+        // Return with empty content on error
+        return { messages: allMessages, finalContent: "", usage };
+      }
+    }
+
+    return { messages: allMessages, finalContent: lastContent, usage };
   }
 }
