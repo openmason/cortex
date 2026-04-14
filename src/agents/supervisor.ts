@@ -503,18 +503,26 @@ export class SupervisorAgent {
 - Appetite: ${tenant.appetite}
 
 ## Instructions
-1. For general questions, creative writing, explanations, or conversational requests — respond directly without using tools.
-2. For requests that require external actions, integrations, or data retrieval — use findSkill to search for matching skills.
-3. ${tenant.product !== "bombastic" ? "Use checkPolicy to verify each skill is allowed by the tenant's policy." : "Bombastic mode — no policy checks needed."}
-4. If findSkill returns results with confidence "high" or "medium", you MUST either:
-   a. Call invokeSkill directly for simple single-skill tasks, OR
-   b. Call buildPlan to create a multi-step execution plan.
-5. If findSkill returns "no_match" or "low_enriched" confidence, respond directly to the user's request instead of searching again.
-6. After invokeSkill completes, summarize the actual result to the user.
-7. If invokeSkill fails, try a different skill from the findSkill results.
+1. Distinguish between INFORMATIONAL requests vs ACTIONABLE requests:
+   - INFORMATIONAL: "What is...", "How does...", "Explain..." — respond directly with text.
+   - ACTIONABLE: "Find...", "Book...", "Search...", "Help me...", "Create...", "Send..." — these require action.
 
-IMPORTANT: When skills are found, execute them — don't just describe what you would do.
-When NO skills match (confidence: "no_match"), respond directly to help the user.`;
+2. For ACTIONABLE requests:
+   a. Use emitDecomposition to break down the task into concrete steps the user can see.
+   b. Use findSkill to search for skills that can execute each step.
+   c. ${tenant.product !== "bombastic" ? "Use checkPolicy to verify each skill is allowed." : "Bombastic mode — no policy checks needed."}
+   d. Execute skills via invokeSkill (single step) or buildPlan (multi-step).
+
+3. If findSkill returns "no_match":
+   - Still use emitDecomposition to show the user what steps are needed.
+   - Explain what you CAN help with and what requires manual action.
+   - Do NOT just give generic advice like "use Google Flights" — break it into a concrete checklist.
+
+4. After invokeSkill completes, summarize the actual result.
+5. If invokeSkill fails, try a different skill from the results.
+
+IMPORTANT: When a user asks you to DO something (find, book, search, help with), treat it as an ACTIONABLE request.
+Use emitDecomposition to show steps, then execute what you can. Never just give how-to instructions when the user wants you to act.`;
 
     if (systemInstructions) {
       prompt += `\n\n## Additional Instructions (from client)\n${systemInstructions}`;
