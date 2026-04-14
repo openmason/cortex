@@ -422,6 +422,21 @@ export class ToolExecutor {
             type: "skill-not-found",
             query: args.query as string,
             message: "No automated skill available - user action required",
+            isManual: true,  // Client can use this to show manual icon (hand, user, etc.)
+          }],
+        });
+      }
+    } else if (response.results.length > 0) {
+      // Emit skill-found event so client can show automated icon
+      if (this.onEvent) {
+        await this.onEvent({
+          type: "data",
+          data: [{
+            type: "skill-found",
+            query: args.query as string,
+            skillName: response.results[0].name,
+            skillSlug: response.results[0].slug,
+            isManual: false,  // Client can use this to show automated icon (robot, gear, etc.)
           }],
         });
       }
