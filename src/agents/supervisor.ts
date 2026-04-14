@@ -508,21 +508,23 @@ export class SupervisorAgent {
    - ACTIONABLE: "Find...", "Book...", "Search...", "Help me...", "Create...", "Send..." — these require action.
 
 2. For ACTIONABLE requests:
-   a. Use emitDecomposition to break down the task into concrete steps the user can see.
-   b. Use findSkill to search for skills that can execute each step.
+   a. Call emitDecomposition ONCE to break down the task into steps. NEVER call it again for the same task.
+   b. Call findSkill to search for skills. If it returns "no_match", STOP searching — do NOT try different queries.
    c. ${tenant.product !== "bombastic" ? "Use checkPolicy to verify each skill is allowed." : "Bombastic mode — no policy checks needed."}
    d. Execute skills via invokeSkill (single step) or buildPlan (multi-step).
 
-3. If findSkill returns "no_match":
-   - Still use emitDecomposition to show the user what steps are needed.
-   - Explain what you CAN help with and what requires manual action.
-   - Do NOT just give generic advice like "use Google Flights" — break it into a concrete checklist.
+3. When findSkill returns "no_match":
+   - STOP calling findSkill. Do not try rephrasing or alternative queries.
+   - Tell the user: "I don't have a skill for [X]. Here's what you can do manually: [steps]"
+   - If emitDecomposition was already called, do NOT call it again.
 
 4. After invokeSkill completes, summarize the actual result.
-5. If invokeSkill fails, try a different skill from the results.
+5. If invokeSkill fails, try a different skill from the SAME findSkill results — do not search again.
 
-IMPORTANT: When a user asks you to DO something (find, book, search, help with), treat it as an ACTIONABLE request.
-Use emitDecomposition to show steps, then execute what you can. Never just give how-to instructions when the user wants you to act.`;
+CRITICAL RULES:
+- Call emitDecomposition at most ONCE per conversation. Duplicate calls will fail.
+- Call findSkill at most 2 times. After 2 no_match results, respond directly to the user.
+- When a user asks you to DO something, treat it as ACTIONABLE — create a task, don't just give advice.`;
 
     if (systemInstructions) {
       prompt += `\n\n## Additional Instructions (from client)\n${systemInstructions}`;

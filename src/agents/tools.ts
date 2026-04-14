@@ -250,6 +250,12 @@ export class ToolExecutor {
   /** Results from invoked skills, keyed by step index */
   private stepResults = new Map<number, unknown>();
 
+  /** Track if decomposition was already emitted this session */
+  private decompositionEmitted = false;
+
+  /** Track findSkill no_match count to prevent endless searching */
+  private noMatchCount = 0;
+
   constructor(
     private env: Env,
     private tenant: TenantContext,
@@ -302,6 +308,14 @@ export class ToolExecutor {
   // -----------------------------------------------------------------------
 
   private async handleEmitDecomposition(args: Record<string, unknown>): Promise<unknown> {
+    // Prevent duplicate decomposition calls - this is a common LLM mistake
+    if (this.decompositionEmitted) {
+      return {
+        error: "Decomposition already emitted for this task. Do not call emitDecomposition again.",
+        alreadyEmitted: true,
+      };
+    }
+
     const steps = (args.steps as Array<{ title: string; requires_approval?: boolean }>).map((s) => ({
       title: s.title,
       status: "pending" as const,
@@ -316,6 +330,7 @@ export class ToolExecutor {
       });
     }
 
+    this.decompositionEmitted = true;
     return { emitted: true, stepCount: steps.length };
   }
 
@@ -339,6 +354,16 @@ export class ToolExecutor {
   }
 
   private async handleFindSkill(args: Record<string, unknown>): Promise<unknown> {
+    // Check if we've already had too many no_match results - stop searching
+    if (this.noMatchCount >= 2) {
+      return {
+        results: [],
+        confidence: "no_match",
+        stopSearching: true,
+        message: "No skills found after multiple attempts. STOP calling findSkill and respond directly to the user.",
+      };
+    }
+
     let response: FindSkillResponse;
     try {
       response = await this.runics.findSkill({
@@ -353,6 +378,11 @@ export class ToolExecutor {
       return { error: `Runics search failed: ${err instanceof Error ? err.message : String(err)}` };
     }
 
+    // Track no_match results
+    if (response.confidence === "no_match") {
+      this.noMatchCount++;
+    }
+
     // Cache discovered skills for later use
     for (const skill of response.results) {
       // Derive r2BundleKey for worker/container skills (convention: skills/{slug}/{version}/bundle.js)
@@ -362,7 +392,7 @@ export class ToolExecutor {
       this.discoveredSkills.set(skill.id, skill);
     }
 
-    return {
+    const result: Record<string, unknown> = {
       results: response.results.map((s) => ({
         id: s.id,
         slug: s.slug,
@@ -379,6 +409,13 @@ export class ToolExecutor {
       confidence: response.confidence,
       composition: response.composition,
     };
+
+    // Add hint to stop searching after first no_match
+    if (response.confidence === "no_match") {
+      result.hint = "No matching skills found. Do NOT try different query variations. Respond to the user directly.";
+    }
+
+    return result;
   }
 
   private async handleCheckPolicy(args: Record<string, unknown>): Promise<unknown> {
