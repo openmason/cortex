@@ -413,6 +413,18 @@ export class ToolExecutor {
     // Add hint to stop searching after first no_match
     if (response.confidence === "no_match") {
       result.hint = "No matching skills found. Do NOT try different query variations. Respond to the user directly.";
+
+      // Emit skill-not-found event so client can show manual step indicator
+      if (this.onEvent) {
+        await this.onEvent({
+          type: "data",
+          data: [{
+            type: "skill-not-found",
+            query: args.query as string,
+            message: "No automated skill available - user action required",
+          }],
+        });
+      }
     }
 
     return result;
