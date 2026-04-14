@@ -503,28 +503,33 @@ export class SupervisorAgent {
 - Appetite: ${tenant.appetite}
 
 ## Instructions
-1. Distinguish between INFORMATIONAL requests vs ACTIONABLE requests:
-   - INFORMATIONAL: "What is...", "How does...", "Explain..." — respond directly with text.
-   - ACTIONABLE: "Find...", "Book...", "Search...", "Help me...", "Create...", "Send..." — these require action.
+1. Classify every user message as INFORMATIONAL or ACTIONABLE:
+   - INFORMATIONAL: "What is...", "How does...", "Explain...", "Tell me about..." — respond with text only.
+   - ACTIONABLE: Everything else — "Find...", "Book...", "Search...", "Help me...", "I need...", "I want...", "Can you..." — these need a task.
 
-2. For ACTIONABLE requests:
-   a. Call emitDecomposition ONCE to break down the task into steps. NEVER call it again for the same task.
-   b. Call findSkill to search for skills. If it returns "no_match", STOP searching — do NOT try different queries.
-   c. ${tenant.product !== "bombastic" ? "Use checkPolicy to verify each skill is allowed." : "Bombastic mode — no policy checks needed."}
-   d. Execute skills via invokeSkill (single step) or buildPlan (multi-step).
+2. For ACTIONABLE requests, ALWAYS call emitDecomposition FIRST:
+   - Break down the request into 2-5 concrete steps
+   - Call emitDecomposition immediately — do NOT skip this step
+   - This creates a visible checklist for the user regardless of whether skills exist
 
-3. When findSkill returns "no_match":
-   - STOP calling findSkill. Do not try rephrasing or alternative queries.
-   - Tell the user: "I don't have a skill for [X]. Here's what you can do manually: [steps]"
-   - If emitDecomposition was already called, do NOT call it again.
+3. AFTER emitDecomposition, try to find skills:
+   a. Call findSkill once to search for skills that can execute the steps.
+   b. ${tenant.product !== "bombastic" ? "Use checkPolicy to verify each skill is allowed." : "Bombastic mode — no policy checks needed."}
+   c. If skills found: execute via invokeSkill or buildPlan.
+   d. If no_match: tell the user which steps require manual action. Do NOT search again.
 
-4. After invokeSkill completes, summarize the actual result.
-5. If invokeSkill fails, try a different skill from the SAME findSkill results — do not search again.
+4. After invokeSkill completes, summarize the result.
 
 CRITICAL RULES:
-- Call emitDecomposition at most ONCE per conversation. Duplicate calls will fail.
-- Call findSkill at most 2 times. After 2 no_match results, respond directly to the user.
-- When a user asks you to DO something, treat it as ACTIONABLE — create a task, don't just give advice.`;
+- For ANY actionable request, call emitDecomposition FIRST. No exceptions.
+- Call emitDecomposition exactly ONCE. Duplicate calls will fail.
+- Call findSkill at most 2 times total. After no_match, STOP and respond.
+- NEVER respond with just advice/instructions for actionable requests — ALWAYS create a task first.
+
+Examples of ACTIONABLE requests that MUST trigger emitDecomposition:
+- "find cheapest ticket from SFO to MAA" → emitDecomposition with search/compare/book steps
+- "help me plan a birthday party" → emitDecomposition with venue/guest/food steps
+- "I need to book a hotel" → emitDecomposition with search/compare/reserve steps`;
 
     if (systemInstructions) {
       prompt += `\n\n## Additional Instructions (from client)\n${systemInstructions}`;
