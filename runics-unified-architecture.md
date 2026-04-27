@@ -1,12 +1,15 @@
 # Runics — Full Architecture & Implementation Spec
 
 > **Purpose:** Single source of truth for Runics: search, sync pipelines, publish API, lifecycle management, and implementation spec for Claude Code.
-> **Parent doc:** `cortex-specification.md`
+> **Parent doc:** `cortex-specification-v2_0.md`
 > **Stack:** TypeScript · Cloudflare Workers · Neon Postgres (pgvector) · Workers AI · KV · R2 · Queues · Hyperdrive
-> **Date:** March 2026 · v5.1
-> **Status:** DECIDED — measure-first, provider-abstracted. Sprint 3a in progress.
+> **Date:** April 2026 · v5.4
+> **Status:** Backend ~92% complete (479 tests, 57 endpoints, 14 migrations). Public launch prep in progress. Step 1 (consumption MVP at runics.net) is the immediate priority.
 > **v5.0 changes:** Status lifecycle (vulnerable/revoked/degraded), version ranking by trust×usage, Circle-IR async scanning, composite trust formula, human-distilled source.
 > **v5.1 changes:** ControlCenter renamed to ControlDeck (controldeck.dev). Product appetite defaults documented inline. Cortex API session config drives all search filter parameters — Runics does not set product defaults independently. Company: Cognium Labs.
+> **v5.2 changes:** `runtime_env` column added to skills table — declares the execution environment a skill requires (`llm`, `api`, `browser`, `vm`, `local`, `device`). `visibility` column added (`public`, `private`, `unlisted`). `PUT /v1/skills/:id` expanded to allow content editing on draft skills (skill_md, description, schema_json, tags, categories, name). `share_url` domain updated to runics.net. SearchFilters extended. Companion doc: `runics-app-specification.md`.
+> **v5.3 changes:** Local agent support. `portable` derived flag on skills (can this skill run outside cloud infrastructure?). `GET /v1/skills/:slug/pull` for downloading full skill content. `GET /v1/catalog/export` for offline skill catalog snapshots. Invocation reporting accepts `source` field (`cortex` vs `local`). API key types (`cortex`, `agent`, `cli`, `ci`). SearchFilters extended with `portable` filter. Cortex Protocol spec referenced as companion doc.
+> **v5.4 changes:** `workflow_definition` JSONB column added to skills table for DAG-based compositions (uses @runics/dag schema). `runtime_env: device` removed (Thingz out of scope). Skill revocation/modification event system added — Runics emits events on skill status changes, Cortex receives and forwards to products. Cognium relationship clarified: Cognium is exclusively a Runics ingestion-time dependency, never called at runtime by Cortex. Companion doc: `runics-dag-specification.md` · `api-key-middleware-specification.md`.
 
 ---
 
@@ -28,7 +31,7 @@
 14. [API Surface](#14-api-surface)
 15. [Caching Strategy](#15-caching-strategy)
 16. [Technology Stack & Cost Model](#16-technology-stack--cost-model)
-17. [MVP Build Plan](#17-mvp-build-plan)
+17. [Build Plan](#17-build-plan)
 18. [Eval Suite](#18-eval-suite)
 19. [Migration Triggers](#19-migration-triggers)
 20. [Risks & Mitigations](#20-risks--mitigations)
@@ -139,6 +142,13 @@ export interface SearchFilters {
   // v5.0: status lifecycle filters
   allowVulnerable?: boolean;        // default: depends on appetite (balanced=true, cautious=false)
   statusFilter?: SkillStatus[];     // override: specific statuses to include
+
+  // v5.2: execution environment + visibility
+  runtimeEnv?: string[];            // filter by runtime environment(s)
+  visibility?: 'public' | 'private' | 'unlisted';  // default: respects tenant scope
+
+  // v5.3: portability filter for local agents
+  portable?: boolean;               // true = only skills that can run outside cloud infrastructure
 }
 
 export type SkillStatus =
@@ -380,6 +390,42 @@ CREATE TABLE IF NOT EXISTS skills (
   execution_layer TEXT NOT NULL
     CHECK (execution_layer IN ('mcp-remote', 'instructions', 'worker', 'container', 'composite')),
 
+  -- v5.2: Execution environment (what infrastructure the skill needs)
+  -- v5.4: 'device' removed (Thingz out of scope). Daytona replaced by CF Sandbox SDK.
+  runtime_env TEXT NOT NULL DEFAULT 'api'
+    CHECK (runtime_env IN ('llm', 'api', 'browser', 'vm', 'local')),
+    -- llm: LLM context only, no external call
+    -- api: stateless HTTP call to external service
+    -- browser: interactive web session (CF Browser Rendering)
+    -- vm: sandboxed code execution (CF Sandbox SDK or Dynamic Workers)
+    -- local: runs on user's machine via local node
+
+  -- v5.2: Visibility control
+  visibility TEXT NOT NULL DEFAULT 'public'
+    CHECK (visibility IN ('public', 'private', 'unlisted')),
+    -- public: searchable by everyone (tenant_id NULL or any tenant)
+    -- private: searchable only by owning tenant
+    -- unlisted: accessible by direct ID/URL, not in search results
+
+  -- v5.3: Portability (can this skill run outside cloud infrastructure?)
+  portable BOOLEAN NOT NULL DEFAULT true GENERATED ALWAYS AS (
+    runtime_env IN ('llm', 'local')
+    OR (runtime_env = 'api' AND mcp_url IS NOT NULL)
+  ) STORED,
+    -- true: can run anywhere (instructions, public MCP endpoints, local)
+    -- false: requires cloud infrastructure (CF Browser Rendering, CF Sandbox SDK)
+    -- Derived from runtime_env — not set manually
+
+  -- v5.4: DAG workflow definition (for composite skills)
+  -- Uses @runics/dag WorkflowDAG schema. Stored as JSONB.
+  -- NULL for atomic skills. Required for execution_layer = 'composite'.
+  workflow_definition JSONB,
+
+  CONSTRAINT workflow_definition_required CHECK (
+    (execution_layer != 'composite') OR
+    (execution_layer = 'composite' AND workflow_definition IS NOT NULL)
+  ),
+
   -- Discoverability
   tags TEXT[] DEFAULT '{}',
   categories TEXT[] DEFAULT '{}',
@@ -392,7 +438,7 @@ CREATE TABLE IF NOT EXISTS skills (
   homepage_url TEXT,
   demo_url TEXT,
   share_url TEXT GENERATED ALWAYS AS (
-    'https://runics.dev/skills/' || slug
+    'https://runics.net/skills/' || slug
   ) STORED,
 
   -- v5.0: Lifecycle management
@@ -464,6 +510,9 @@ CREATE INDEX idx_skills_source ON skills(source);
 CREATE INDEX idx_skills_slug ON skills(slug);
 CREATE INDEX idx_skills_slug_version ON skills(slug, version);
 CREATE INDEX idx_skills_execution_layer ON skills(execution_layer);
+CREATE INDEX idx_skills_runtime_env ON skills(runtime_env);
+CREATE INDEX idx_skills_visibility ON skills(visibility);
+CREATE INDEX idx_skills_portable ON skills(portable);
 CREATE INDEX idx_skills_skill_type ON skills(skill_type);
 CREATE INDEX idx_skills_tags ON skills USING gin(tags);
 CREATE INDEX idx_skills_categories ON skills USING gin(categories);
@@ -536,16 +585,17 @@ export function appetiteToTrustThreshold(appetite: Appetite): number {
 
 ### Product Defaults
 
-Runics does not set appetite defaults directly. The Cortex API session config (see `cortex-specification.md` §23) passes appetite and filter parameters per request. These are the canonical defaults per product:
+Runics does not set appetite defaults directly. The Cortex API session config (see `cortex-specification-v2_0.md` §8) passes appetite and filter parameters per request. Cortex reads trust scores from cached Runics skill metadata — it does not call Cognium at runtime. Cognium is exclusively a Runics ingestion-time dependency. These are the canonical defaults per product:
 
 | Product | Domain | Appetite | Min Trust | Allow Vulnerable |
 |---|---|---|---|---|
 | **Bombastic** | bombastic.one | `balanced` | 0.50 | `true` |
 | **CoStaff** | costaff.app | `cautious` | 0.70 | `false` |
 | **ControlDeck** | controldeck.dev | `cautious` | 0.70 | `false` (configurable per partner tenant) |
+| **Akrobatos** | TBD | `strict` | 0.85 | `false` |
 | **External SaaS** | customer domain | configurable | configurable | configurable |
 
-All four are passed into `SearchFilters` at query time — Runics applies them uniformly regardless of which product made the request.
+All are passed into `SearchFilters` at query time — Runics applies them uniformly regardless of which product made the request.
 
 ---
 
@@ -851,6 +901,27 @@ CREATE INDEX IF NOT EXISTS idx_skills_composition_ids ON skills USING gin(compos
 CREATE INDEX IF NOT EXISTS idx_skills_run_count ON skills(run_count DESC);
 ```
 
+### Migration 0015: workflow_definition + runtime_env update (v5.4)
+
+```sql
+-- v5.4: Add workflow_definition column for DAG compositions
+ALTER TABLE skills ADD COLUMN IF NOT EXISTS workflow_definition JSONB;
+
+-- v5.4: Require workflow_definition for composite skills
+ALTER TABLE skills ADD CONSTRAINT workflow_definition_required CHECK (
+  (execution_layer != 'composite') OR
+  (execution_layer = 'composite' AND workflow_definition IS NOT NULL)
+);
+
+-- v5.4: Remove 'device' from runtime_env
+ALTER TABLE skills DROP CONSTRAINT IF EXISTS skills_runtime_env_check;
+ALTER TABLE skills ADD CONSTRAINT skills_runtime_env_check
+  CHECK (runtime_env IN ('llm', 'api', 'browser', 'vm', 'local'));
+
+-- Update any existing device skills to 'api'
+UPDATE skills SET runtime_env = 'api' WHERE runtime_env = 'device';
+```
+
 ---
 
 ## 9. Ingestion Pipeline
@@ -1038,6 +1109,7 @@ export class McpRegistrySync extends BaseSyncWorker {
       slug: slugify(raw.name),
       description: raw.description,
       executionLayer: 'mcp-remote',
+      runtimeEnv: 'api',                           // v5.2: MCP servers are API calls
       mcpUrl: raw.endpoint,
       capabilitiesRequired: raw.requiredScopes ?? [],
       source: 'mcp-registry',
@@ -1061,6 +1133,7 @@ export class ClawHubSync extends BaseSyncWorker {
       slug: slugify(raw.name),
       description: raw.description ?? '',
       executionLayer: raw.hasCode ? 'worker' : 'instructions',
+      runtimeEnv: raw.hasCode ? 'api' : 'llm',    // v5.2: instructions = llm, code = api default
       skillMd: raw.skillMd,
       schemaJson: raw.schema,
       source: 'clawhub',
@@ -1084,6 +1157,7 @@ export class GitHubSync extends BaseSyncWorker {
       slug: slugify(raw.full_name.replace('/', '-')),
       description: raw.description ?? '',
       executionLayer: 'container',
+      runtimeEnv: 'vm',                             // v5.2: GitHub repos run in sandbox
       capabilitiesRequired: ['git'],
       source: 'github',
       sourceUrl: raw.html_url,
@@ -1218,6 +1292,197 @@ app.patch('/v1/skills/:id/status', async (c) => {
 });
 ```
 
+### PUT /v1/skills/:id — Draft Content Editing (v5.2)
+
+Draft skills can have their content edited. Published skills are immutable — modifications require a fork.
+
+```typescript
+const draftEditSchema = z.object({
+  name: z.string().min(1).max(200).optional(),
+  description: z.string().min(10).max(2000).optional(),
+  skillMd: z.string().optional(),
+  schemaJson: z.record(z.unknown()).optional(),
+  tags: z.array(z.string()).optional(),
+  categories: z.array(z.string()).optional(),
+  mcpUrl: z.string().url().optional(),
+  environmentVariables: z.array(z.string()).optional(),
+});
+
+app.put('/v1/skills/:id', zValidator('json', draftEditSchema), async (c) => {
+  const skillId = c.req.param('id');
+  const skill = await db.query.skills.findFirst({ where: eq(skills.id, skillId) });
+
+  if (!skill) return c.json({ error: 'not found' }, 404);
+  if (skill.status !== 'draft') {
+    return c.json({ error: 'only draft skills are editable — fork to modify published skills' }, 400);
+  }
+
+  const input = c.req.valid('json');
+
+  // Immutable fields: slug, execution_layer, runtime_env, source, forked_from, tenant_id
+
+  await db.update(skills).set({
+    ...input,
+    updatedAt: new Date(),
+  }).where(eq(skills.id, skillId));
+
+  // Re-embed if description or skill_md changed
+  if (input.description || input.skillMd) {
+    await c.env.EMBED_QUEUE.send({ skillId, action: 'embed' });
+  }
+
+  // Re-scan if skill_md or mcpUrl changed
+  if (input.skillMd || input.mcpUrl) {
+    await c.env.COGNIUM_QUEUE.send({
+      skillId,
+      priority: 'normal',
+      timestamp: Date.now(),
+    });
+  }
+
+  return c.json({ id: skillId, status: 'draft' });
+});
+```
+
+### POST /v1/skills/:id/publish — Publish a Draft (v5.2)
+
+Transitions a draft skill to published status. Runs final validation.
+
+```typescript
+app.post('/v1/skills/:id/publish', async (c) => {
+  const skillId = c.req.param('id');
+  const skill = await db.query.skills.findFirst({ where: eq(skills.id, skillId) });
+
+  if (!skill) return c.json({ error: 'not found' }, 404);
+  if (skill.status !== 'draft') {
+    return c.json({ error: 'only draft skills can be published' }, 400);
+  }
+
+  // Require description and at least one content artifact
+  if (!skill.description) return c.json({ error: 'description required' }, 400);
+  if (!skill.skillMd && !skill.mcpUrl && !skill.r2BundleKey) {
+    return c.json({ error: 'skill needs content: skill_md, mcp_url, or code bundle' }, 400);
+  }
+
+  await db.update(skills).set({
+    status: 'published',
+    publishedAt: new Date(),
+    updatedAt: new Date(),
+  }).where(eq(skills.id, skillId));
+
+  return c.json({ id: skillId, status: 'published' });
+});
+```
+
+### GET /v1/skills/:slug/pull — Download Skill for Local Use (v5.3)
+
+Returns full skill content for local agents to embed in their own context. The `npm install` equivalent for skills.
+
+```typescript
+app.get('/v1/skills/:slug/pull', async (c) => {
+  const slug = c.req.param('slug');
+  const version = c.req.query('version');
+
+  const skill = version
+    ? await db.query.skills.findFirst({ where: and(eq(skills.slug, slug), eq(skills.version, version)) })
+    : await db.query.skills.findFirst({
+        where: eq(skills.slug, slug),
+        orderBy: [desc(skills.trustScore)],  // best trust version
+      });
+
+  if (!skill) return c.json({ error: 'not found' }, 404);
+  if (skill.visibility === 'private') return c.json({ error: 'private skill' }, 403);
+
+  return c.json({
+    slug: skill.slug,
+    version: skill.version,
+    name: skill.name,
+    description: skill.description,
+    skillMd: skill.skillMd,
+    schemaJson: skill.schemaJson,
+    executionLayer: skill.executionLayer,
+    runtimeEnv: skill.runtimeEnv,
+    portable: skill.portable,
+    trustScore: skill.trustScore,
+    verificationTier: skill.verificationTier,
+    trustBadge: skill.trustBadge,
+    status: skill.status,
+    tags: skill.tags,
+    categories: skill.categories,
+    authRequirements: skill.authRequirements,
+    capabilitiesRequired: skill.capabilitiesRequired,
+    mcpUrl: skill.mcpUrl,
+    forkedFrom: skill.forkedFrom,
+    source: skill.source,
+  });
+});
+```
+
+### GET /v1/catalog/export — Offline Skill Catalog Snapshot (v5.3)
+
+Returns a JSONL file of skills for offline local agent use. Filtered by portability, runtime, and trust.
+
+```typescript
+app.get('/v1/catalog/export', async (c) => {
+  const runtimeEnv = c.req.query('runtimeEnv')?.split(',');
+  const portable = c.req.query('portable') === 'true' ? true : undefined;
+  const minTrust = parseFloat(c.req.query('minTrust') ?? '0.5');
+  const format = c.req.query('format') ?? 'jsonl';  // jsonl only for now
+
+  const rows = await db.select({
+    slug: skills.slug,
+    version: skills.version,
+    name: skills.name,
+    description: skills.description,
+    agentSummary: skills.agentSummary,
+    skillMd: skills.skillMd,
+    schemaJson: skills.schemaJson,
+    executionLayer: skills.executionLayer,
+    runtimeEnv: skills.runtimeEnv,
+    portable: skills.portable,
+    trustScore: skills.trustScore,
+    tags: skills.tags,
+    categories: skills.categories,
+    mcpUrl: skills.mcpUrl,
+  })
+  .from(skills)
+  .where(and(
+    eq(skills.status, 'published'),
+    eq(skills.visibility, 'public'),
+    gte(skills.trustScore, minTrust),
+    portable !== undefined ? eq(skills.portable, portable) : undefined,
+    runtimeEnv?.length ? inArray(skills.runtimeEnv, runtimeEnv) : undefined,
+  ));
+
+  const body = rows.map(r => JSON.stringify(r)).join('\n');
+  return new Response(body, {
+    headers: {
+      'Content-Type': 'application/x-ndjson',
+      'Content-Disposition': 'attachment; filename="runics-catalog.jsonl"',
+    },
+  });
+});
+```
+
+### POST /v1/invocations — Invocation Reporting (v5.3 update)
+
+v5.3 adds `source` field to distinguish Cortex-originated invocations from local agent invocations.
+
+```typescript
+const invocationSchema = z.object({
+  invocations: z.array(z.object({
+    skillId: z.string().uuid(),
+    source: z.enum(['cortex', 'local']).default('cortex'),  // v5.3: caller origin
+    callerType: z.enum(['agent', 'human']).default('agent'),
+    compositionId: z.string().uuid().optional(),
+    durationMs: z.number().optional(),
+    succeeded: z.boolean(),
+  })),
+});
+```
+
+Local agent invocations count toward `agent_invocation_count` and version ranking but are tracked separately in `search_logs` for analytics. Leaderboard signals from local vs cortex sources are not blended — both contribute to the agent track but with `source` attribution for filtering.
+
 ### Validation Schema
 
 ```typescript
@@ -1246,6 +1511,10 @@ export const publishSkillSchema = z.object({
   trustScore: z.number().min(0).max(1).optional(),
   altQueries: z.array(z.string()).optional(), // provided by Forge Mode 3
   bundle: z.instanceof(ArrayBuffer).optional(),
+
+  // v5.2: execution environment + visibility
+  runtimeEnv: z.enum(['llm', 'api', 'browser', 'vm', 'local']).optional(),
+  visibility: z.enum(['public', 'private', 'unlisted']).optional(),
 });
 ```
 
@@ -1308,7 +1577,10 @@ export class PgVectorProvider implements SearchProvider {
           s.skill_type,
           s.forked_from,
           s.run_count,
-          s.last_run_at
+          s.last_run_at,
+          s.runtime_env,
+          s.visibility,
+          s.portable
 
         FROM skill_embeddings se
         JOIN skills s ON se.skill_id = s.id
@@ -1325,6 +1597,22 @@ export class PgVectorProvider implements SearchProvider {
 
           -- Tenant scope
           AND (s.tenant_id IS NULL OR s.tenant_id = ${tenantId})
+
+          -- v5.2: Visibility filter
+          AND (
+            s.visibility = 'public'
+            OR (s.visibility IN ('private', 'unlisted') AND s.tenant_id = ${tenantId})
+          )
+
+          -- v5.2: Runtime environment filter
+          ${filters.runtimeEnv?.length
+            ? sql`AND s.runtime_env IN (${sql.join(filters.runtimeEnv.map(r => sql`${r}`), sql`,`)})`
+            : sql``}
+
+          -- v5.3: Portability filter (local agents)
+          ${filters.portable !== undefined
+            ? sql`AND s.portable = ${filters.portable}`
+            : sql``}
 
           -- Optional: pin to specific slug
           ${options?.slug ? sql`AND s.slug = ${options.slug}` : sql``}
@@ -1357,7 +1645,10 @@ export class PgVectorProvider implements SearchProvider {
         skill_type,
         forked_from,
         run_count,
-        last_run_at
+        last_run_at,
+        runtime_env,
+        visibility,
+        portable
       FROM vector_search
       ORDER BY fused_score DESC
       LIMIT ${options?.limit ?? 10}
@@ -1532,14 +1823,16 @@ POST   /v1/search/feedback              // record quality feedback
 
 // ── Publish ──
 POST   /v1/skills                       // publish a new skill
-PUT    /v1/skills/:id                   // update skill (draft only)
+PUT    /v1/skills/:id                   // update skill content (draft only, v5.2)
 // (no PUT /v1/skills/:id/trust — Cognium poll consumer writes via applyScanReport())
 PATCH  /v1/skills/:id/status            // owner: deprecate / restore to published
 DELETE /v1/skills/:id                   // remove (draft only; published = deprecate)
+POST   /v1/skills/:id/publish           // publish a draft skill (v5.2)
 
 // ── Versions ──
 GET    /v1/skills/:slug/versions        // all versions of a skill slug
 GET    /v1/skills/:slug/:version        // specific version
+GET    /v1/skills/:slug/pull            // v5.3: full skill content for local use (skill_md, schema, trust_score)
 
 // ── Composition ──
 POST   /v1/skills/:id/fork              // fork → new version, trust resets
@@ -1561,8 +1854,12 @@ DELETE /v1/skills/:id/star
 GET    /v1/skills/:id/stars
 
 // ── Agent Signals ──
-POST   /v1/invocations                  // record skill invocations (bulk)
+POST   /v1/invocations                  // record skill invocations (bulk), v5.3: accepts source field
 GET    /v1/skills/:id/cooccurrence      // top skills used alongside this one
+
+// ── Catalog (v5.3) ──
+GET    /v1/catalog/export               // offline skill catalog snapshot (JSONL)
+                                        // ?runtimeEnv=llm,api&portable=true&minTrust=0.5
 
 // ── Leaderboards ──
 GET    /v1/leaderboards/human
@@ -1606,6 +1903,8 @@ GET    /health
   "appetite": "balanced",    // optional, default "balanced"
   "tags": ["rust"],
   "category": "security",
+  "runtimeEnv": ["llm", "api"],          // v5.2: filter by execution environment
+  "portable": true,                       // v5.3: only skills that run locally
   "limit": 10,
   "version": "1.0.0"         // optional: pin to specific version
 }
@@ -1684,73 +1983,162 @@ Both within Neon Pro 10GB limit.
 
 ---
 
-## 17. MVP Build Plan
+## 17. Build Plan
 
-### Phase 1: Foundation + Eval (Week 1)
+### Implementation Status
 
-- [ ] `wrangler.toml` with all Cloudflare bindings
-- [ ] Drizzle schema + migrations 0001–0003
-- [ ] `SearchProvider` interface (with v5.0 `SearchFilters`)
-- [ ] `PgVectorProvider` — single-vector, status-aware filter, version ranking
-- [ ] `EmbedPipeline.processSkill()`
-- [ ] `EmbedPipeline.checkContentSafety()`
-- [ ] `SearchCache` — KV with TTL + slug invalidation
-- [ ] `SearchLogger` — log every search event (non-blocking)
-- [ ] `PerfMonitor` — structured timing
-- [ ] Hono router: `/v1/search`, `/v1/skills/:id/index`, `/health`
-- [ ] Trust filtering (`appetite` → `minTrustScore` + status exclusion)
-- [ ] **Eval suite: 100+ query/skill pairs, Recall@1, Recall@5, MRR**
-- [ ] **Run eval → record baseline numbers**
-- [ ] **Derive tier thresholds from actual score distribution**
+Backend is ~92% of the v5.2 spec. 479 tests passing across 33 files. 57 HTTP endpoints. 14 database migrations. Clean typecheck.
 
-**Exit criteria:** Baseline measured. Status filter tested. Version ranking verified. p50 < 60ms.
+| Area | Status |
+|---|---|
+| SearchProvider + PgVectorProvider | ✅ Done |
+| Multi-vector indexing (agent_summary + 5 alt queries) | ✅ Done |
+| Three-tier confidence routing | ✅ Done |
+| Cross-encoder reranker | ✅ Done |
+| Composition detector | ✅ Done |
+| Status lifecycle (v5.0) | ✅ Done |
+| Version ranking (trust×0.7 + usage×0.3) | ✅ Done |
+| Publish API (CRUD + draft editing + publish flow) | ✅ Done |
+| v5.2 schema columns (runtime_env, visibility) | ✅ Done |
+| v5.2 search filters (runtimeEnv[], visibility) | ✅ Done |
+| Sync pipelines (MCP Registry, ClawHub, GitHub) | ✅ Done |
+| Cognium/Circle-IR pipeline (submit→poll→apply→cascade→notify) | ✅ Done |
+| Queue system (embed, cognium submit/poll, DLQs) | ✅ Done |
+| Composition & social (fork, copy, extend, compose, stars, invocations) | ✅ Done |
+| Leaderboards (human, agent, trending, most-forked, most-composed) | ✅ Done |
+| Monitoring (SearchLogger, QualityTracker, PerfMonitor) | ✅ Done |
+| Rate limiting (KV sliding window) | ✅ Done |
+| Circuit breaker (LLM calls) | ✅ Done |
+| Content safety (Llama Guard 3 8B) | ✅ Done |
+| Eval suite (90+ fixtures, KV persistence, compare endpoint) | ✅ Done |
+| Production config (wrangler.production.toml + provisioning) | ✅ Done |
 
-### Phase 2: Intelligence Layer (Week 2)
+### P0 Fixes — Before Any Public Exposure (~1-2 days)
 
-- [ ] `ConfidenceGate` — full tier routing
-- [ ] Tier 2 async enrichment
-- [ ] Tier 3 deep search
-- [ ] `CompositionDetector`
-- [ ] `QualityTracker.recordFeedback()` + feedback endpoint
-- [ ] Analytics endpoints
-- [ ] **Re-run eval with LLM fallback → measure lift**
+- [ ] **Cache invalidation on revocation.** Revoked skills visible for up to 120s via stale cache. Implement `revoked_slugs` KV set: on revoke, add slug to set; on cache read, check set before returning. ~50 lines.
+- [ ] **v5.2 fields in search results.** `runtime_env` and `visibility` not returned in ScoredSkill. Add to `enrichWithSkillMetadata()` in PgVectorProvider. ~10 lines.
+- [ ] **share_url domain.** Compute `https://runics.net/skills/${slug}` in API response layer. Or add generated column via migration. Trivial.
 
-### Phase 3: Multi-Vector Validation (Week 3)
+### P1 Fixes — Before Public API (~1 day)
 
-- [ ] `EmbedPipeline.processSkillMultiVector()`
-- [ ] Human-distilled alt query passthrough (skip LLM generation)
-- [ ] **A/B test: single-vector vs multi-vector vs single + query expansion**
-- [ ] **Decision: keep multi-vector if lift ≥ 5% over query expansion**
+- [ ] **Status transition validation.** No enforcement of valid state transitions (e.g., `revoked→published` possible via PATCH). Add state machine guard: owner can only set `deprecated` or `published` (from `published` only). Cognium controls all other transitions. ~30 lines.
+- [ ] **Public read-only router.** Create separate Hono router for runics.net that mounts only: search, skill detail, versions, health, eval results. Do not expose fork/publish/star/delete/admin on public domain. Internal/staging router keeps full 57 endpoints.
 
-### Phase 4: Production Polish (Week 4)
+### Step 1: Public Launch — Consumption MVP at runics.net
 
-- [ ] Cross-encoder reranking (bge-reranker-base, optional per-query)
-- [ ] Score-based fusion vs RRF A/B test
-- [ ] Rate limiting on search endpoint
-- [ ] Error handling: retries, circuit breaker
-- [ ] Load test: p50 < 60ms, p99 < 500ms
+**Goal:** Read-only search + trust scores across all skill sources. No auth needed.
 
-### Phase 5: Sync Pipelines & Publish API (Weeks 5–6)
+**Pitch:** "Every agent skill. Trust-scored. Search 15,000+ skills in natural language."
 
-- [ ] `BaseSyncWorker` — v5.0: no trust_score set on sync
-- [ ] `McpRegistrySync`, `ClawHubSync`, `GitHubSync` adapters
-- [ ] `POST /v1/skills` — full publishSkillSchema with v5.0 fields
-- [ ] Cognium poll consumer writes trust scores directly via `applyScanReport()` — no HTTP callback endpoint
-- [ ] `PATCH /v1/skills/:id/status` — owner deprecate/restore
-- [ ] `GET /v1/skills/:slug/versions` — version listing
-- [ ] Queue integration: EMBED_QUEUE + COGNIUM_QUEUE (submit) + COGNIUM_POLL_QUEUE producers; COGNIUM_JOBS KV namespace
-- [ ] Migration 0008 (lifecycle columns)
-- [ ] Cache invalidation on status change
+#### Backend (1-2 days, parallel with data)
 
-### Phase 6: Lifecycle & Composition (Sprint 4, alongside Cognium)
+- [ ] P0 fixes (cache invalidation, search result fields, share_url)
+- [ ] P1 fixes (status transitions, public read-only router)
+- [ ] CORS for runics.net origin
+- [ ] Verify API latency: p50 < 60ms, p99 < 500ms under load
 
-- [ ] Migrations 0004–0008
-- [ ] `POST /v1/skills/:id/fork` — v5.0: trust resets, provenance set
-- [ ] `POST /v1/compositions` — v5.0: trust = min(constituents) × 0.90
-- [ ] `POST /v1/compositions/:id/publish` — composition status machine
-- [ ] Dual-track social model (stars, invocations)
-- [ ] Leaderboard materialized views
-- [ ] Co-occurrence map
+#### Data Import & Validation (3-5 days, parallel with UI)
+
+- [ ] Run ClawHub full sync against production DB
+- [ ] Run MCP Registry sync against production DB
+- [ ] Audit import results: total skills, category distribution, description quality
+- [ ] Identify and flag garbage skills (empty descriptions, duplicates, broken schemas)
+- [ ] **Run eval suite against real imported catalog** — get recall@5 number on production data
+- [ ] Start Cognium scanning (background, progressive — top 500 by description quality first)
+- [ ] Verify: at least 500 skills with real trust scores at launch
+- [ ] Unscanned skills display "Scan pending" badge (honest, not misleading)
+- [ ] Review tags/categories taxonomy — ensure filters make sense
+
+#### Production Infrastructure (1-2 days, parallel)
+
+- [ ] Neon production database provisioned
+- [ ] Hyperdrive configured for production DB
+- [ ] KV namespaces created (cache, cognium jobs, rate limit, eval results)
+- [ ] R2 bucket created (skill bundles)
+- [ ] Queues created (embed, cognium submit, cognium poll, DLQs)
+- [ ] DNS: runics.net → CF Pages (frontend)
+- [ ] DNS: api.runics.net → Runics Worker (or path-based routing)
+- [ ] SSL verified on both domains
+- [ ] Cron triggers active (sync schedules)
+
+#### Web UI — runics.net (1.5-2 weeks, critical path)
+
+- [ ] Framework: Astro on CF Pages (static, fast, edge-cached)
+- [ ] Landing page: pitch, search bar, trust score explainer, "how it works"
+- [ ] Search results page: skill cards (name, description, trust badge, runtime_env, source, category)
+- [ ] Skill detail page: skill_md/readme rendered, trust breakdown, Cognium scan status, source link, tags, category, version, lineage (if forked)
+- [ ] Filters: source (ClawHub/MCP Registry/GitHub), trust score range, category, runtime_env
+- [ ] Empty state / no results: helpful message, suggest broader query
+- [ ] Mobile responsive
+- [ ] Fast: < 200ms search-to-render (API is < 60ms, rendering budget is ~140ms)
+- [ ] OG meta tags for social sharing (skill detail pages generate preview cards)
+- [ ] Favicon, logo, minimal branding
+- [ ] Analytics: basic page views, search query logging (already in backend)
+
+#### Launch Content (2-3 days, parallel)
+
+- [ ] Demo video: 60s — type query → results with trust badges → detail page → filter by source
+- [ ] HN post: "Show HN: Semantic search across 15K+ agent skills with security trust scores"
+- [ ] Product Hunt page: screenshots, tagline, maker story
+- [ ] Blog post: "Why the agent ecosystem needs a trust layer"
+- [ ] Twitter/X launch thread
+- [ ] Comparison table on landing page: Runics vs ClawHub vs MCP Registry (semantic search ✅/❌, trust scores ✅/❌, aggregation ✅/❌)
+
+#### Post-Launch Monitoring
+
+- [ ] Search latency dashboard (p50, p95, p99)
+- [ ] Sync failure alerts (cron health)
+- [ ] Cognium scan queue depth + failure rate
+- [ ] Rate limit hit rate
+- [ ] Top 50 search queries (weekly review — inform catalog gaps)
+- [ ] Failed searches / no results (vocabulary gaps to fix with alt queries or new skills)
+- [ ] User engagement: searches/day, unique IPs, bounce rate
+
+**Timeline: ~3 weeks from start.** Critical path is the web UI. Backend fixes, data import, infra, and content are all parallelizable.
+
+### Step 2: Fork & Private Registry (post-launch, driven by traction)
+
+Depends on: Step 1 traction signal (search volume, return visitors, community feedback).
+
+- [ ] Auth layer (passkeys + magic link, reuse Bombastic pattern)
+- [ ] API key management (create/rotate/revoke, scoped: read/write/admin)
+- [ ] Fork button on skill detail page
+- [ ] Inline skill_md editor (markdown textarea)
+- [ ] "My Skills" dashboard (forked + published skills)
+- [ ] Private scope (forked skills visible only to owner)
+- [ ] v5.3 additions: `portable` derived flag, `GET /v1/skills/:slug/pull`, `GET /v1/catalog/export`, invocation `source` field
+
+### Step 3: Full Public Registry (post Step 2)
+
+- [ ] Publish flow (create new skill from scratch)
+- [ ] Composition builder UI
+- [ ] CLI (`runics publish`, `runics fork`, `runics search`)
+- [ ] GitHub App (push SKILL.md → auto-publish)
+- [ ] GitHub Action (Cognium trust badge in CI)
+- [ ] Public profiles, author pages
+- [ ] OpenAPI docs site
+
+### Step 4: Platform / Multi-Tenant (post Step 3)
+
+- [ ] Workspace provisioning (self-service)
+- [ ] RBAC (owner/admin/member/viewer)
+- [ ] Credential vault for forked MCP skills
+- [ ] Billing (Stripe)
+- [ ] cortex-local reference implementation
+- [ ] Cortex Protocol spec published
+
+### Explicitly Deferred Past Step 1
+
+| Feature | When | Why |
+|---|---|---|
+| Auth / API keys | Step 2 | Read-only launch needs no auth |
+| Fork / compose / publish UI | Step 2 | Consumption-first |
+| v5.3 portable, pull, export | Step 2 | Local agent story follows public launch |
+| GitHub sync improvements | Week 2 post-launch | ClawHub + MCP Registry is enough for launch |
+| Intelligence layer tuning | Post-launch | Thresholds already calibrated from eval (0.40/0.35) |
+| Multi-vector A/B testing | Post-launch | Already implemented, tune with real traffic data |
+| Cortex Protocol / cortex-local | Step 4 | Needs ecosystem traction first |
+| Billing | Step 4 | Free tier only until Step 4 |
 
 ---
 
@@ -1803,15 +2191,29 @@ The eval runner hits the live search endpoint and computes metrics. Results stor
 
 ## 20. Risks & Mitigations
 
+### Architecture Risks (unchanged)
+
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Baseline match rate < 60% | Tier 3 over-triggered, cost breaks | Eval catches in Week 1. Investigate model upgrade or HyDE. |
-| Multi-vector lift < 5% | 6x storage for marginal gain | Phase 3 A/B test validates. Query expansion as alternative. |
-| Status filter false exclusions | Good skills excluded when vulnerable | `allowVulnerable=true` for balanced/adventurous. Vulnerable skills searchable with badge, not hidden. |
-| Version ranking surfacing wrong version | Old/low-trust version shown despite better newer version | Formula is trust×0.7 + usage×0.3. New versions catch up quickly once they earn runs. |
-| Cache staleness after revocation | Revoked skill appears in search results up to 60s | Slug-based KV invalidation on revoke. Acceptable window for MVP; reduce TTL if needed. |
-| Confidence thresholds wrong | Over/under-triggering Tier 3 | Derive from eval data. Monitor daily. |
+| Baseline match rate < 60% | Tier 3 over-triggered, cost breaks | Eval suite exists (90+ fixtures). Run against real imported data before launch. |
+| Multi-vector lift < 5% | 6x storage for marginal gain | Already implemented. Tune with real traffic post-launch. |
+| Status filter false exclusions | Good skills excluded when vulnerable | `allowVulnerable=true` for balanced/adventurous appetite. |
+| Cache staleness after revocation | Revoked skill appears in search results | P0 fix: slug-based KV invalidation. Must ship before launch. |
+| Confidence thresholds wrong | Over/under-triggering Tier 3 | Already calibrated (0.40/0.35 from eval tuning). Monitor post-launch. |
 | LLM cost escalation | Tier 2/3 more expensive than projected | Conservative thresholds. KV caching deduplicates. |
+
+### Public Launch Risks (v5.3)
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| **ClawHub data quality** | Garbage skills make catalog feel unreliable | Audit import: flag empty descriptions, duplicates. Curate before launch. |
+| **Search quality on real data** | Eval suite passed on test fixtures but fails on real catalog | Run eval against imported ClawHub data as first priority. Fix before UI work. |
+| **Circle-IR scan throughput** | 13,700+ skills × 60s/scan = ~228 hours | Progressive: scan top 500 first. Unscanned show "Scan pending." Don't wait for full scan. |
+| **HN/PH traffic spike** | Search latency degrades under load | KV cache handles repeated queries. Rate limiting in place. Load test before launch. |
+| **Empty categories** | User filters by category, gets zero results | Audit category distribution after import. Merge sparse categories. |
+| **Mutation endpoints exposed** | Unauthenticated fork/delete/star on public API | Ship public read-only router. Internal router for Cortex only. |
+| **Web UI delivery delay** | Frontend is the critical path (~2 weeks) | Can soft-launch API-only for developers (HN post with curl examples) if UI slips. |
+| **Embedding quality on sparse descriptions** | ClawHub skills with 1-line descriptions embed poorly | Agent summary generation enriches at ingest. Verify quality on sample. |
 
 ---
 
@@ -1947,6 +2349,32 @@ runics/
 9. **Trust is Cognium's responsibility.** Sync workers do NOT set trust_score. `0.5 / unverified` is the default until Cognium scans.
 
 10. **Eval runs before and after every change.** Numbers only — no "feels better."
+
+11. **`runtime_env` is orthogonal to `execution_layer` (v5.2).** `execution_layer` describes *how* Cortex invokes the skill (MCP protocol, prompt injection, code bundle). `runtime_env` describes *what infrastructure* the skill needs (browser session, sandbox). Both must be set. Sync adapters infer `runtime_env` from source conventions; users can override on fork.
+
+12. **Visibility defaults (v5.2).** Public catalog skills: `visibility = 'public'`. Forked skills: `visibility = 'private'`. Users can change visibility on their own skills only. Visibility is enforced in the search query, not just a display hint.
+
+13. **`portable` is derived, never set manually (v5.3).** Computed from `runtime_env` as a generated column. `llm` and `local` are always portable. `api` is portable if `mcp_url` is public. `browser` and `vm` are not portable (require cloud infrastructure). Local agents filter `?portable=true` to get only skills they can run.
+
+14. **Skill pull is the download, not the search result (v5.3).** Search returns metadata + scores. `/v1/skills/:slug/pull` returns the full `skill_md`, `schema_json`, and `auth_requirements` — everything a local agent needs to embed the skill in its own context. Private skills return 403 on pull.
+
+15. **Invocation source tracking (v5.3).** The `source` field on invocations (`cortex` vs `local`) allows distinguishing cloud-originated usage from local agent usage. Both contribute to version ranking and leaderboards but can be filtered independently for analytics. Never blend blindly — local agents may have different invocation patterns.
+
+### Deployment
+
+| Environment | API URL | Web URL | CF Account |
+|-------------|---------|---------|------------|
+| **Production** | `https://api.runics.net` | `https://runics.net` | cognium (`bb8e02ea0ca7c225d2fb62d24a9940be`) |
+| **Staging** | `https://runics.phantoms.workers.dev` | `https://runics-web-brm.pages.dev` | phantoms (`1f59f4dcd0ebb559e3c392566978d446`) |
+
+Deploy commands:
+```bash
+# Staging
+npx wrangler deploy
+
+# Production
+npx wrangler deploy -c wrangler.production.toml
+```
 
 ### Cloudflare bindings
 
@@ -2127,7 +2555,8 @@ export async function forkSkill(
       root_source,
       trust_score, verification_tier, trust_badge,
       run_count,
-      capabilities_required, source
+      capabilities_required, source,
+      runtime_env, visibility
     ) VALUES (
       $1, $2, $3, 'forked', 'draft',
       $4, $5, $6, $7,
@@ -2137,7 +2566,8 @@ export async function forkSkill(
       $16,
       $17, 'unverified', NULL,
       0,
-      $18, 'human-distilled'
+      $18, 'human-distilled',
+      $19, 'private'
     ) RETURNING id, slug, version`,
     [
       `${source.rows[0].name}`,           // keep original name
@@ -2158,6 +2588,7 @@ export async function forkSkill(
       originSource,                       // root_source: preserved across all fork generations
       resetTrust,                         // trust reset — not inherited
       source.rows[0].capabilities_required,
+      source.rows[0].runtime_env,         // v5.2: runtime_env copied from parent
     ]
   );
 
@@ -2380,6 +2811,73 @@ timon-security-review
 | Co-occurrence | Agent only | Min 2 compositions required |
 | Fork lineage | Both | Factual — no score attached |
 | Trust badge | Provenance | Set at publish, not earned |
+
+### 23.9 DAG Compositions (v5.4)
+
+Complex workflows are stored as skills with `execution_layer: 'composite'` and a `workflow_definition` JSONB column containing a DAG in the @runics/dag format.
+
+The DAG format supports:
+- Parallel execution (steps with no shared dependencies)
+- Conditional branching (condition expressions evaluated at runtime)
+- Retry policies (per step: count, backoff, delay)
+- Approval gates (per step)
+- Static and dynamic skill binding
+- Input mapping between steps (template expressions)
+
+The existing `composition_steps` table remains for simple linear compositions (backward compatible). New compositions should use the DAG format. Migration tooling will be provided to convert `composition_steps` to DAG format.
+
+Trust scoring for DAG compositions: `trust_score = min(constituent_trust_scores) × 0.90` — unchanged from linear compositions. For dynamic-binding steps, trust is evaluated at execution time.
+
+See `runics-dag-specification.md` for the complete schema definition.
+
+---
+
+## 24. Skill Events (v5.4)
+
+Runics emits events when skill status changes that may affect running workflows or dependent compositions.
+
+### Event Types
+
+| Event | Trigger | Payload |
+|---|---|---|
+| `skill.revoked` | Cognium CRITICAL finding → status set to `revoked` | `{ skillId, slug, version, reason, cwe }` |
+| `skill.vulnerable` | Cognium HIGH/MEDIUM finding → status set to `vulnerable` | `{ skillId, slug, version, severity, findings }` |
+| `skill.updated` | Skill content updated (new version published) | `{ skillId, slug, oldVersion, newVersion }` |
+| `skill.deprecated` | Owner deprecates a skill | `{ skillId, slug, version }` |
+
+### Event Delivery
+
+Events are delivered via Cloudflare Queue to registered consumers. Cortex is the primary consumer.
+
+```toml
+# wrangler.toml addition
+[[queues.producers]]
+binding = "SKILL_EVENTS"
+queue = "runics-skill-events"
+```
+
+```typescript
+// Event producer (in skill status change handlers)
+await env.SKILL_EVENTS.send({
+  type: 'skill.revoked',
+  skillId: skill.id,
+  slug: skill.slug,
+  version: skill.version,
+  reason: remediationMessage,
+  timestamp: new Date().toISOString(),
+});
+```
+
+### Consumer Contract
+
+Cortex (and any future consumers) subscribes to the `runics-skill-events` queue:
+
+1. Receives event
+2. Identifies affected workflow instances (by scanning for skillRef matching the slug@version)
+3. Pushes notification to product DOs
+4. Products handle per their own logic (pause, notify, auto-substitute)
+
+Runics has no knowledge of how consumers handle events. It emits and moves on.
 
 ---
 

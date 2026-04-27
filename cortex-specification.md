@@ -1,976 +1,827 @@
-# Cortex
+# Cortex Specification — v2.0
 
-## The Shared Agent Runtime
-
-> **Version:** 1.3 · March 2026
-> **Status:** Architecture decided. Runics search service in active build (Sprint 3a).
-> **Companion docs:** `runics-unified-architecture.md` · `cognium-server-specification.md` · `cognium-client-specification.md` · `forge-specification.md` · `bombastic-specification.md`
-> **Scope:** Everything between the products (Bombastic, CoStaff, ControlDeck) and the user. The complete runtime that makes AI agents work.
-> **v1.2 changes:** ControlCenter renamed to ControlDeck (controldeck.dev). Cortex API upgraded with AI SDK Data Stream Protocol for AIChatAgent compatibility. Multi-product config shape added. Bombastic thin-wrapper pattern documented.
-> **v1.3 changes:** Bombastic agent renamed to Clove. Product defaults resolved server-side by `productId` (products send identity only). Approval timeout added (`approvalTimeoutMs`). Approval signal flow generalized (product-agnostic — no channel dependency). BombasticAgent example updated with error handling and auth headers.
-
----
-
-## Table of Contents
-
-1. [What Cortex Is](#1-what-cortex-is)
-2. [Architecture Overview](#2-architecture-overview)
-3. [Design Principles](#3-design-principles)
-4. [Component Map](#4-component-map)
-5. [Mastra — Orchestration](#5-mastra--orchestration)
-6. [Runics — Skill Registry & Search](#6-runics--skill-registry--search)
-7. [Forge — Skill Generation & Distillation](#7-forge--skill-generation--distillation)
-8. [Cognium — Trust & Security](#8-cognium--trust--security)
-9. [Activepieces — Triggers & Events](#9-activepieces--triggers--events)
-10. [Daytona — Container Execution](#10-daytona--container-execution)
-11. [Skill Execution Layers](#11-skill-execution-layers)
-12. [Skill Lifecycle](#12-skill-lifecycle)
-13. [Workflow Pause & Human Review](#13-workflow-pause--human-review)
-14. [The Request Lifecycle](#14-the-request-lifecycle)
-15. [Data Model](#15-data-model)
-16. [Multi-Tenancy](#16-multi-tenancy)
-17. [Technology Stack](#17-technology-stack)
-18. [Deployment Architecture](#18-deployment-architecture)
-19. [Cost Model](#19-cost-model)
-20. [Build Roadmap](#20-build-roadmap)
-21. [Risks & Mitigations](#21-risks--mitigations)
-22. [Open Questions](#22-open-questions)
+> **Applies to:** `cortex-specification.md` — full rewrite, supersedes v1.5
+> **Version:** 2.0 · April 2026
+> **Status:** Architecture locked. Implementation pending.
+> **Company:** Cognium Labs
+> **Stack:** TypeScript · Cloudflare Workers · Cloudflare Workflows · Cloudflare Sandbox SDK · Browser Rendering · KV · Queues
+> **Companion docs:** `cognium-architecture-overview.md` · `runics-dag-specification.md` · `runics-unified-architecture.md` · `api-key-middleware-specification.md` · `bombastic-specification.md`
+>
+> **v2.0 changes:** Cortex is now a durable workflow engine built on Cloudflare Workflows. Mastra extracted to a stateless reasoning wrapper (separate Worker, service binding). Forge absorbed as an internal async subsystem. Activepieces demoted to code dependency. DAG-based execution using @runics/dag format. Dual mode: conversational (ephemeral) and workflow (durable). Daytona replaced by CF Sandbox SDK. Dynamic Workers for lightweight execution. API surface expanded with workflow CRUD and webhook routing.
 
 ---
 
 ## 1. What Cortex Is
 
-Cortex is the shared agent runtime that powers every product on the platform. It sits between what users see (Bombastic, CoStaff, ControlDeck, future products) and the underlying infrastructure (Cloudflare, Neon, Daytona). Products are thin configuration layers on top of Cortex. The intelligence, execution, security, and learning all live here.
+Cortex is the execution spine of Cognium Labs. It is a durable workflow engine that executes DAGs of skills, coordinating between skill discovery (Runics), trust verification (cached from Cognium), LLM reasoning (Mastra wrapper), and external services (Activepieces connectors).
+
+Every product (Clove, CoStaff, ControlDeck, Akrobatos) calls Cortex to execute work. Cortex owns the lifecycle of every workflow: instantiation, step execution, approval pausing, error handling, and completion notification.
+
+**What Cortex is NOT:**
+- Not an LLM orchestration library (that's the Mastra wrapper)
+- Not a skill registry (that's Runics)
+- Not a trust verifier (that's Cognium, called by Runics at ingestion)
+- Not a connector platform (that's Activepieces, imported as code)
+- Not a product state manager (that's @specifica/store in product DOs)
+
+---
+
+## 2. Architecture
 
 ```
-Products:     Bombastic · CoStaff · ControlDeck · (future SaaS)
+Product DOs ──HTTP──▶ Cortex API Worker ──binding──▶ CortexDAGExecutor
+                              │                        (CF Workflow)
+                              │                            │
+                    ◀──WebSocket──────────────────────────┘
+                                                           │
+                              ┌─────────────────┬──────────┼──────────┐
+                              │                 │          │          │
+                         Mastra wrapper    Runics API   Sandbox    Browser
+                        (service binding)  (HTTP)       SDK       Rendering
                               │
-                    ┌─────────┴──────────┐
-                    │      CORTEX        │  ← the shared agent runtime
-                    │                    │
-                    │  Mastra            │  orchestration + memory
-                    │  Runics            │  skill registry + search
-                    │  Forge             │  skill generation + distillation
-                    │  Cognium           │  trust + security scanning
-                    │  Activepieces      │  triggers + events
-                    │  Daytona           │  container execution
-                    └────────────────────┘
-                              │
-Infrastructure:    Cloudflare · Neon · Workers AI
+                         LLM Proxy
+                        (external)
 ```
 
-The whole platform boils down to one sentence: **An LLM orchestrator that discovers, evaluates, and executes reusable skills through natural language.**
+### Internal Components
 
-**ControlDeck** (controldeck.dev) is the B2B and partner-facing product built on Cortex. It exposes the full platform capability — workflow authoring, skill composition, human review gates, and the save-as-skill loop — to business operators and integration partners. Where Bombastic is personal and CoStaff is departmental, ControlDeck is the autonomous improvement infrastructure layer.
-
----
-
-## 2. Architecture Overview
-
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                              PRODUCTS                                    │
-│                                                                          │
-│   ┌────────────┐  ┌────────────┐  ┌─────────────────────────────┐       │
-│   │ Bombastic  │  │  CoStaff   │  │      ControlDeck            │       │
-│   │ Personal   │  │ Business   │  │ B2B / Partner Platform      │       │
-│   │ assistant  │  │ automation │  │ Workflow authoring +        │       │
-│   │            │  │ + policies │  │ Skill composition +         │       │
-│   │            │  │            │  │ Human review gates          │       │
-│   └─────┬──────┘  └─────┬──────┘  └─────────────┬───────────────┘       │
-│         └───────────────┴─────────────────────────┘                     │
-│                              │                                           │
-│  ════════════════════════════╪══════════════════════════════════════      │
-│                              │   CORTEX                                  │
-│                              ▼                                           │
-│   ┌──────────────────────────────────────────────────────────────────┐  │
-│   │  MASTRA (Orchestration)                                          │  │
-│   │  Supervisor agent · Memory · Durable execution · Streaming       │  │
-│   │  Pause/Resume for human review gates                             │  │
-│   └──────────────────────────┬───────────────────────────────────────┘  │
-│                              │                                           │
-│   ┌──────────────────────────▼───────────────────────────────────────┐  │
-│   │  RUNICS (Skill Registry)                                         │  │
-│   │  Semantic search · Trust filtering · Version lineage             │  │
-│   │  Status-aware (published/vulnerable/revoked/degraded)            │  │
-│   └──┬──────────────────────────────────────────────┬───────────────┘  │
-│      │                                              │                   │
-│   ┌──▼──────────────┐           ┌───────────────────▼────────────────┐  │
-│   │ COGNIUM (Trust) │           │ EXECUTION ROUTER                   │  │
-│   │ Severity-based  │           │ L0: MCP · L1: Instruct             │  │
-│   │ revocation      │           │ L2: Worker · L3: Daytona           │  │
-│   │ Composite        │           └───────────────────┬────────────────┘  │
-│   │ degradation     │                               │                   │
-│   └─────────────────┘           ┌───────────────────▼────────────────┐  │
-│                                 │ FORGE (Skill Learning)             │  │
-│   ┌─────────────────┐           │ Auto-distill · Human-distill       │  │
-│   │  ACTIVEPIECES   │           │ Generate-before · Save-as-skill    │  │
-│   │  Triggers/Events│           └────────────────────────────────────┘  │
-│   └─────────────────┘                                                   │
-└──────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 3. Design Principles
-
-**Skills are functions, not services.** A skill is code with an MCP interface. It boots, executes, returns, and dies. Nothing needs to be always alive except triggers and the database.
-
-**The LLM is the only decision-maker.** Mastra's supervisor agent plans, dispatches, reads results, and loops. Execution layers are invisible to it. Whether a skill runs as a remote HTTP call, a Cloudflare Worker, or a container — the LLM doesn't know or care.
-
-**Skills are immutable, trust is versioned.** A published skill cannot be modified. To change it, fork it. Trust scores are earned per version, not inherited. This makes every workflow reproducible and every security guarantee auditable.
-
-**Single-system simplicity.** All persistent state lives in one Postgres database. No sync queues, no eventual consistency, no second system to monitor.
-
-**Measure first.** Validate performance through evaluation suites before adding architectural complexity.
-
-**Integration over invention.** Leverage existing open-source TypeScript solutions (Mastra, Activepieces, Daytona, Drizzle, Hono) over custom development. Build only the parts that don't exist: confidence-gated search, skill distillation, trust scoring.
-
-**Layered execution minimizes cost.** Route 65% of skill executions to zero-cost paths (remote MCP, LLM instructions), 20% to near-zero-cost Workers, and only 15% to containers.
-
-**Human in the loop is a first-class feature.** Workflows can pause before execution for human plan review, modification, and approval. This is especially important for ControlDeck's B2B and partner use cases.
-
----
-
-## 4. Component Map
-
-| Component | Role | Build vs Buy | Always On? |
+| Component | Deployment | Connection | Purpose |
 |---|---|---|---|
-| **Mastra** | Orchestration, memory, durable execution, pause/resume | Buy (OSS) | Workers (serverless) |
-| **Runics** | Skill registry, semantic search, status filtering | Build | Workers (serverless) |
-| **Forge** | Skill generation, auto-distillation, human-distillation | Build | Queue consumer |
-| **Cognium** | Trust scoring, severity-based revocation | Build | Queue consumer |
-| **Activepieces** | Event triggers, webhooks, cron | Buy (OSS, self-hosted) | Always on |
-| **Daytona** | Container sandboxes for Layer 3 skill execution | Buy (AGPL, cloud) | On-demand |
+| Cortex API Worker | CF Worker | Public HTTP | Routes requests, manages instances, handles webhooks |
+| CortexDAGExecutor | CF Workflow | Binding from API Worker | Executes DAGs durably |
+| Mastra wrapper | Separate CF Worker | Service binding (zero-latency) | LLM reasoning on demand |
+| Forge | Internal queue consumer | CF Queue within Cortex | Trace capture → skill distillation |
 
 ---
 
-## 5. Mastra — Orchestration
+## 3. Dual Execution Mode
 
-### What It Does
+### 3.1 Conversational Mode
 
-Mastra is the supervisor brain. Every user request becomes a Mastra agent session. The supervisor agent plans, calls Runics to find skills, routes execution, reads results, and loops until the task is done.
+For real-time chat. Ephemeral, no durable state. Direct to Mastra wrapper.
 
-### Pause / Resume for Human Review
+**When:** product sends `POST /v1/chat` — user is typing in scoped chat, expecting immediate response.
 
-Mastra's durable execution (Cloudflare Durable Objects) supports pause/resume natively. Cortex uses this for human review gates — critical for ControlDeck workflows where operators want to approve plans before execution.
+**Flow:** API Worker → Mastra wrapper → LLM reasons → stream response to product.
+
+**Promotion:** if the LLM response includes an `emit_decomposition` call, Cortex auto-promotes to workflow mode. The API Worker instantiates a CF Workflow with the DAG, and the response stream continues while the workflow executes in the background.
+
+### 3.2 Workflow Mode
+
+For durable multi-step execution. CF Workflow instance per DAG.
+
+**When:** product sends `POST /v1/workflows` with a DAG, or conversational mode auto-promotes.
+
+**Flow:** API Worker creates CF Workflow instance → CortexDAGExecutor runs → steps execute per DAG → product notified on completion/error via WebSocket.
+
+---
+
+## 4. API Surface
+
+### 4.1 Endpoints
+
+| Method | Path | Purpose | Auth |
+|---|---|---|---|
+| `POST` | `/v1/chat` | Conversational mode — stream LLM response | API key (cortex scope) |
+| `POST` | `/v1/workflows` | Create a durable workflow instance | API key (cortex scope) |
+| `GET` | `/v1/workflows/:id` | Query workflow instance state | API key (cortex scope) |
+| `POST` | `/v1/workflows/:id/terminate` | Terminate a running workflow | API key (cortex scope) |
+| `POST` | `/v1/approvals/:id/approve` | Resume a paused workflow step | API key (cortex scope) |
+| `POST` | `/v1/approvals/:id/reject` | Cancel a paused workflow step | API key (cortex scope) |
+| `POST` | `/v1/webhooks/:tenantId/:workflowId` | External event delivery | Webhook signature |
+| `GET` | `/health` | Service health | Public |
+
+### 4.2 POST /v1/chat
+
+Conversational mode. Backward compatible with v1.5.
 
 ```typescript
-// Step 1: supervisor plans the workflow
-const planStep = new Step({
-  execute: async ({ context }) => {
-    const plan = await supervisor.plan(context.input);
+interface ChatRequest {
+  productId: string;
+  userId: string;
+  conversationId?: string;
+  messages: Message[];
+  context?: Record<string, unknown>;
+  model?: string;
+}
+```
 
-    // Pause and surface the plan for human review
-    await workflow.pause({
-      resumeData: plan,
-      timeoutMs: 300_000,  // 5 minutes
+Returns: AI SDK Data Stream Protocol (streaming response).
+
+If the LLM calls `emit_decomposition`, the response includes a `workflow_created` data part:
+
+```typescript
+interface WorkflowCreatedEvent {
+  type: 'workflow_created';
+  workflowId: string;
+  dag: WorkflowDAG;
+  status: 'running';
+}
+```
+
+### 4.3 POST /v1/workflows
+
+Create a durable workflow instance from a DAG.
+
+```typescript
+interface CreateWorkflowRequest {
+  productId: string;
+  tenantId: string;
+  userId: string;
+  dag: WorkflowDAG;              // @runics/dag format
+  productItemId?: string;        // back-reference to product DO item
+  callbackUrl?: string;          // product DO URL for completion/error notification
+}
+
+interface CreateWorkflowResponse {
+  workflowId: string;
+  status: 'running' | 'queued';
+  dag: WorkflowDAG;
+  createdAt: string;
+}
+```
+
+### 4.4 GET /v1/workflows/:id
+
+```typescript
+interface WorkflowStatus {
+  workflowId: string;
+  status: 'running' | 'waiting' | 'complete' | 'errored' | 'terminated';
+  currentStep?: string;
+  completedSteps: string[];
+  pendingApprovals: ApprovalRequest[];
+  outputs: Record<string, unknown>;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+```
+
+### 4.5 POST /v1/webhooks/:tenantId/:workflowId
+
+External event delivery. Routes to the CF Workflow instance via `sendEvent()`. This endpoint is called by external services (PagerDuty, GitHub, Stripe) that do not have Cognium Labs API keys.
+
+```typescript
+interface WebhookPayload {
+  type: string;          // event type — matched against step.waitForEvent
+  payload: unknown;      // event data
+}
+```
+
+**Authentication (separate from API key middleware):**
+
+Webhook auth uses HMAC-SHA256 signatures, not API keys. Each tenant has a webhook secret stored in KV (`webhook-secret:{tenantId}`). The external service includes the signature in headers.
+
+```typescript
+// Webhook validation
+const signature = c.req.header('X-Cognium-Signature');
+const timestamp = c.req.header('X-Cognium-Timestamp');
+const body = await c.req.text();
+
+// Validate timestamp (prevent replay attacks — reject if >5 minutes old)
+const age = Date.now() - parseInt(timestamp);
+if (age > 300_000) return c.json({ error: 'Timestamp too old' }, 401);
+
+// Validate signature
+const secret = await c.env.WEBHOOK_SECRETS.get(`webhook-secret:${tenantId}`);
+const expected = await hmacSHA256(`${timestamp}.${body}`, secret);
+if (signature !== expected) return c.json({ error: 'Invalid signature' }, 401);
+
+// Validate tenant owns this workflow
+const instance = await c.env.DAG_EXECUTOR.get(workflowId);
+const status = await instance.status();
+if (status.params?.tenantId !== tenantId) return c.json({ error: 'Forbidden' }, 403);
+
+// Deliver event
+await instance.sendEvent({ type: payload.type, payload: payload.payload });
+```
+
+**Webhook secret management:** per-tenant secrets are created during tenant onboarding (via the API key management endpoints). Tenants configure the secret in their external service's webhook settings.
+
+---
+
+## 5. CortexDAGExecutor — The Workflow Class
+
+A single CF Workflow class that executes any DAG from Runics or from inline definition.
+
+```typescript
+import { WorkflowEntrypoint, WorkflowStep, WorkflowEvent } from 'cloudflare:workers';
+import { toExecutionLayers, resolveInputs, evaluateCondition } from '@runics/dag';
+
+interface DAGParams {
+  dag: WorkflowDAG;
+  tenantId: string;
+  productId: string;
+  userId: string;
+  productItemId?: string;
+  callbackUrl?: string;
+  sessionConfig: CortexSessionConfig;
+}
+
+export class CortexDAGExecutor extends WorkflowEntrypoint<Env, DAGParams> {
+  async run(event: WorkflowEvent<DAGParams>, step: WorkflowStep) {
+    const { dag, tenantId, sessionConfig } = event.payload;
+    const layers = toExecutionLayers(dag);
+    const outputs: Record<string, unknown> = {};
+
+    for (const layer of layers) {
+      // Each layer runs as a persisted step (survives hibernation)
+      const layerOutputs = await step.do(
+        `layer-${layer.index}`,
+        async () => {
+          const results: Record<string, unknown> = {};
+
+          // All steps in layer can run in parallel
+          await Promise.all(
+            layer.stepIds.map(async (stepId) => {
+              const dagStep = dag.steps.find(s => s.id === stepId)!;
+
+              // Condition check
+              if (dagStep.condition) {
+                const shouldRun = evaluateCondition(dagStep.condition, outputs);
+                if (!shouldRun) {
+                  results[stepId] = { skipped: true, reason: 'condition_false' };
+                  return;
+                }
+              }
+
+              // Approval gate
+              if (dagStep.requiresApproval) {
+                const approval = await step.waitForEvent(
+                  `approval-${stepId}`,
+                  { type: `approval-${stepId}`, timeout: '30 minutes' }
+                );
+                if (approval?.payload?.decision === 'reject') {
+                  results[stepId] = { skipped: true, reason: 'rejected' };
+                  return;
+                }
+              }
+
+              // Resolve skill
+              const skill = await this.resolveSkill(dagStep, sessionConfig);
+              if (!skill) {
+                if (dagStep.onError === 'skip') {
+                  results[stepId] = { skipped: true, reason: 'skill_not_found' };
+                  return;
+                }
+                throw new Error(`Skill not found for step "${stepId}"`);
+              }
+
+              // Trust check
+              if (skill.trustScore < sessionConfig.minTrust) {
+                throw new Error(
+                  `Skill "${skill.slug}" trust ${skill.trustScore} below minimum ${sessionConfig.minTrust}`
+                );
+              }
+
+              // Resolve inputs
+              const inputs = resolveInputs(dagStep, outputs);
+
+              // Execute
+              const result = await this.executeSkill(skill, inputs, tenantId);
+              results[stepId] = result;
+            })
+          );
+
+          return results;
+        },
+        dagStep?.retry ? {
+          retries: {
+            limit: dagStep.retry.count,
+            delay: `${dagStep.retry.delayMs} milliseconds`,
+            backoff: dagStep.retry.backoff,
+          }
+        } : undefined
+      );
+
+      // Merge layer outputs into accumulated outputs
+      Object.assign(outputs, layerOutputs);
+    }
+
+    // Notify product on completion
+    await step.do('notify-completion', async () => {
+      if (event.payload.callbackUrl) {
+        await fetch(event.payload.callbackUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: 'workflow_complete',
+            workflowId: event.id,
+            outputs,
+          }),
+        });
+      }
     });
 
-    return plan;  // reached only after resume
-  }
-});
+    // Forge trace capture (fire-and-forget via queue)
+    await step.do('capture-trace', async () => {
+      await this.env.FORGE_QUEUE.send({
+        workflowId: event.id,
+        dag: event.payload.dag,
+        outputs,
+        tenantId,
+        userId: event.payload.userId,
+        completedAt: new Date().toISOString(),
+      });
+    });
 
-// Step 2: execution uses the (possibly modified) plan
-const executeStep = new Step({
-  execute: async ({ context }) => {
-    const approvedPlan = context.resumeData;  // may have been edited by user
-    return await executePlan(approvedPlan);
+    return outputs;
   }
-});
+
+  // ... resolveSkill, executeSkill methods below
+}
 ```
 
-### Three Execution Modes
+**Note:** The code above is illustrative. The actual implementation must handle CF Workflows replay semantics carefully:
 
-| Mode | Behaviour | Default For |
-|---|---|---|
-| **Full auto** | Plans and executes without stopping | Recurring / trusted workflows |
-| **Review before run** | Pauses after planning, resumes after approval | ControlDeck default |
-| **Step-by-step** | Pauses after every step for human confirmation | High-stakes workflows |
+1. **Step return values are the only persisted state.** In-memory variables (like `outputs`) are lost on hibernation. However, CF Workflows replays completed steps instantly (returning cached results) on restart, so `outputs` is reconstructed from cached step returns during replay.
 
-The mode is a policy — configurable per tenant, per workflow, or per skill category. CoStaff's policy engine can enforce review-before-run for any skill category marked as sensitive.
+2. **Parallel steps within a layer.** Wrapping an entire layer in one `step.do()` means the whole layer retries together if one step fails. For independent per-step retry, each parallel step should be its own `step.do()` call inside a `Promise.all()`:
+```typescript
+// Better pattern: individual step.do() calls inside Promise.all()
+const results = await Promise.all(
+  layer.stepIds.map(stepId =>
+    step.do(`step-${stepId}`, { retries: stepRetryConfig }, async () => {
+      // ... resolve skill, check trust, execute
+    })
+  )
+);
+```
 
-### Product Agents
+3. **Step names must be deterministic.** Step IDs come from the DAG definition — they are deterministic by design. Never use timestamps, random values, or runtime-dependent strings in step names.
+
+4. **Large step outputs.** Step return values are capped at 1 MiB. For large results (API responses, browser screenshots), store in R2 and return the reference key.
+
+---
+
+## 6. Skill Resolution
+
+### 6.1 Static Binding
 
 ```typescript
-// Bombastic — personal assistant (Clove agent)
-const bombastic = new Agent({
-  tools: [findSkillTool, invokeSkillTool, ...mastraBuiltins],
-  memory: mastraMemory,
-  instructions: "You are Clove, a personal AI agent. Use findSkill to discover capabilities...",
-});
-
-// CoStaff — business automation with policies
-const costaff = new Agent({
-  tools: [findSkillTool, invokeSkillTool, checkPolicyTool, ...mastraBuiltins],
-  memory: mastraMemory,
-  instructions: "You are a business automation agent. Check policies before executing skills.",
-});
-
-// ControlDeck — B2B / partner with human review gates
-const controldeck = new Agent({
-  tools: [findSkillTool, invokeSkillTool, checkPolicyTool, pauseForReviewTool, ...mastraBuiltins],
-  memory: mastraMemory,
-  instructions: "You are a business process automation platform. Plan workflows, present them for human approval, then execute.",
-});
+async resolveSkill(dagStep: WorkflowStep, config: CortexSessionConfig) {
+  if (dagStep.binding === 'static') {
+    // skillRef is "slug@version" — direct lookup
+    const [slug, version] = dagStep.skillRef.split('@');
+    return await this.env.RUNICS_CLIENT.getSkill(slug, version);
+  }
+  // ... dynamic binding below
+}
 ```
 
-The only differences between products: system instructions, trust appetite threshold, whether a policy engine is in the loop, and whether human review gates are enabled by default.
+### 6.2 Dynamic Binding
 
----
-
-## 6. Runics — Skill Registry & Search
-
-Runics is the nervous system. It indexes skills, generates search-optimized embeddings, and serves semantic search with sub-50ms latency.
-
-Key properties:
-
-- Skills are filtered by `status` — `revoked` skills are excluded from search entirely. `vulnerable` skills surface with a warning badge.
-- Search returns version-aware results — the best version per skill slug is surfaced by default (trust × usage signal, not newest).
-- Composite skills inherit status from sub-skills — a composite becomes `contains-vulnerable` if any constituent is `vulnerable`, or `degraded` if any constituent is `revoked`.
-
-See `runics-unified-architecture.md` for full detail.
-
----
-
-## 7. Forge — Skill Generation & Distillation
-
-Forge is the learning loop. Three modes:
-
-- **Mode 1 (Generate-before):** LLM generates a new skill on the fly when no match is found.
-- **Mode 2 (Auto-distill):** Post-workflow hook evaluates traces for reusable patterns and distills them automatically.
-- **Mode 3 (Human-distill):** User explicitly saves a modified workflow as a named skill via the Save-as-Skill UX.
-
-Human-distilled skills get a trust premium over auto-distilled skills at the same score, displayed as a **Human-verified** badge in the UI. All distilled skills are immutable — forks are required to modify.
-
-See `forge-specification.md` for full detail.
-
----
-
-## 8. Cognium — Trust & Security
-
-Cognium pre-computes trust scores for all skills and enforces severity-based status transitions:
-
-| Severity | Action | Effect |
-|---|---|---|
-| CRITICAL | Hard revoke | Pulled from search index, new invocations blocked |
-| HIGH | Flag + notify | Stays in search with warning badge, runtime warning injected |
-| MEDIUM | Flag only | Advisory badge in UI, no execution impact |
-| LOW | Advisory | Surfaced in skill detail, no action |
-
-Revoked skills trigger a cascade: all composite skills containing them are marked `degraded`. Vulnerable skills cascade to `contains-vulnerable` on composites. Partner-facing error messages always include the specific CVE and the path forward (fork suggestion or available patched version).
-
-See `cognium-specification.md`, `cognium-server-specification.md`, and `cognium-client-specification.md` for full detail.
-
----
-
-## 9. Activepieces — Triggers & Events
-
-Activepieces is the event layer. It listens for external events (webhooks, cron, email, Stripe payments, GitHub PRs) and fires Mastra workflows in response.
-
-**Example triggers for ControlDeck:**
-
-| Trigger | Workflow |
-|---|---|
-| GitHub PR opened | Clone → Cognium scan → post results as PR comment |
-| Every Monday 9am | Fetch sales data → generate report → post to Slack |
-| Stripe payment succeeds | Generate invoice → email customer |
-| Slack message mentions bot | Parse request → find skill → execute → reply in thread |
-
----
-
-## 10. Daytona — Container Execution
-
-Daytona provides on-demand container sandboxes for Layer 3 skill execution. Cognium scanning uses Circle-IR (circle.phantoms.workers.dev), not Daytona containers.
-
-| Dimension | Daytona | E2B |
-|---|---|---|
-| Boot time | ~90ms | ~150ms |
-| Session duration | Unlimited | 1hr–24hr |
-| Self-host | Yes (AGPL-3.0) | Yes (Apache-2.0) |
-| Per-sandbox cost | ~$0.067/hr | ~$0.05/hr |
-
----
-
-## 11. Skill Execution Layers
-
-The execution router maps `skill.execution_layer` to the right runtime:
-
-| Layer | Mechanism | Boot | Cost/Exec | ~% of Skills | Example |
-|---|---|---|---|---|---|
-| **L0** Remote MCP | HTTP call to external server | 0ms | $0 | ~30% | GitHub API, Slack, Amadeus |
-| **L1** Instructions | LLM reads SKILL.md, uses Mastra tools | 0ms | $0 infra | ~35% | Shell commands, simple ops |
-| **L2** Worker | Pure function on Cloudflare | <5ms | ~$0.00001 | ~20% | JSON transforms, license checks |
-| **L3** Container | Daytona sandbox, boot→run→destroy | ~90ms | ~$0.001–0.10 | ~15% | cargo tools, Playwright, binaries |
-
-65% of executions hit L0/L1 (zero infra cost). 5× cost reduction over running everything in containers.
-
-**Routing decision tree:**
-```
-Is the skill a remote MCP server?
-├─ YES → L0
-└─ NO → Needs filesystem, binaries, or browser?
-         ├─ YES → L3 (Daytona)
-         └─ NO → Pure JS/TS, no heavy deps?
-                  ├─ YES → L2 (Worker)
-                  └─ NO → Just instructions?
-                           ├─ YES → L1
-                           └─ NO → L2
-```
-
----
-
-## 12. Skill Lifecycle
-
-### Skill Types
-
-Every skill in the registry has a type reflecting how it was created:
-
-| Type | Description | Trust Origin |
-|---|---|---|
-| **Atomic** | Single tool, single execution layer | Cognium scan of source |
-| **Auto-Composite** | Forge-distilled from agent trace | Starts at 0.3, Cognium rebuilds |
-| **Human-Composite** | User saved a modified workflow | Trust floor, earns via runs |
-| **Forked** | Copy of any skill + modifications | Trust resets, provenance preserved |
-
-### Skill Source
-
-| Source | Description |
-|---|---|
-| `mcp-registry` | Synced from Anthropic's MCP registry |
-| `clawhub` | Synced from ClawHub |
-| `github` | Discovered via skills.sh / SKILL.md convention |
-| `forge` | Auto-distilled by Forge from execution traces |
-| `human-distilled` | Explicitly saved by a user post-run |
-| `manual` | Directly published via API |
-
-### Trust Levels
-
-| Score | Label | Behaviour |
-|---|---|---|
-| 0.85+ | High trust | Executes without friction |
-| 0.50–0.84 | Balanced | Default appetite, runs normally |
-| 0.30–0.49 | Low trust | Runs with runtime warning surfaced |
-| <0.30 | Untrusted | Blocked unless tenant explicitly overrides |
-
-Trust is per-version. A fork starts at the floor regardless of parent score.
-
-### Status State Machine
-
-```
-draft → published → deprecated        (owner-initiated, soft)
-             │        ↑
-             ├──→ vulnerable ──────────┘ (Cognium: clean re-scan restores)
-             │         │
-             │         └──→ revoked    (Cognium: CRITICAL severity escalation)
-             │
-             └──→ revoked              (Cognium: CRITICAL severity, direct)
-```
-
-Composite skills carry two distinct **derived statuses** (Cognium-controlled):
-
-```
-contains-vulnerable  (derived: ≥1 constituent is 'vulnerable')
-degraded             (derived: ≥1 constituent is 'revoked')
-```
-
-Both repair automatically when the constituent's status is restored (clean re-scan → `published`).
-
-`deprecated` is owner-controlled. `vulnerable`, `contains-vulnerable`, `degraded`, and `revoked` are Cognium-controlled. These are separate axes — an owner can deprecate a clean skill; Cognium can revoke a skill the owner never intended to deprecate.
-
-### Severity → Action Policy
-
-| Cognium Severity | Status Transition | Search Behaviour | Execution |
-|---|---|---|---|
-| CRITICAL | → `revoked` | Removed from index immediately | Blocked — new invocations error |
-| HIGH | → `vulnerable` | Stays in search, warning badge | Allowed — runtime warning injected |
-| MEDIUM | → `vulnerable` | Advisory badge | Allowed — no execution impact |
-| LOW | Advisory only | No status change | Allowed — detail page note |
-
-**Composite cascade:** When a constituent skill is revoked, all composites containing it are immediately marked `degraded`. When a constituent is `vulnerable`, composites are marked `contains-vulnerable`.
-
-**In-flight protection:** A hard revoke (CRITICAL) allows currently running invocations to finish. New invocations after the revoke are blocked.
-
-**Remediation messaging:** Revoked skill errors always include the specific CVE and the path forward:
-
-```
-❌ Workflow blocked
-
-cargo-audit@1.0.0 was revoked due to CRITICAL vulnerability
-RUSTSEC-2024-XXXX (arbitrary code execution via malformed YAML).
-
-Your options:
-  → Fork timon-security-review@1.0.0 and swap in cargo-audit@1.2.0
-  → Pin to timon-security-review@1.1.0 (already uses patched version)
-  → Contact your admin to approve an exception
-```
-
-### Immutability + Fork Model
-
-Published skills are immutable. To modify:
-
-```
-timon-security-review@1.0.0   [immutable, trust: 0.81, runs: 47]
-    │
-    ├─ edit attempted
-    │       ↓
-    │   "Skills are immutable. Fork to create a new version?"
-    │       ↓
-    │   [ Fork & Edit ]
-    │
-    └─ timon-security-review@1.1.0   [new, trust: floor*, runs: 0]
-            *trust resets — new skill, unproven
-```
-
-**Version lineage in search:**
-```
-timon-security-review
-  ├── @1.0.0  trust: 0.81  runs: 47  ← default (highest trust × usage)
-  ├── @1.1.0  trust: 0.71  runs: 12
-  └── @2.0.0  trust: 0.63  runs: 2
-```
-
-Runics surfaces the best version by default (trust × run count), not the newest. Users can pin to a specific version explicitly.
-
-**Fork provenance:**
 ```typescript
-{
-  slug: "timon-security-review",
-  version: "1.1.0",
-  forked_from: "timon-security-review@1.0.0",
-  forked_by: "user:eyal",
-  changes: ["added cargo-deny", "removed cargo-clippy"],
-  source: "human-distilled",
-  trust_score: 0.63,   // reset
-  runs: 0
+if (dagStep.binding === 'dynamic') {
+  // skillRef is a natural language query — search Runics
+  const results = await this.env.RUNICS_CLIENT.search({
+    query: dagStep.skillRef,
+    appetite: config.appetite,
+    minTrust: config.minTrust,
+    allowVulnerable: config.allowVulnerable,
+    limit: 1,
+  });
+  return results[0] ?? null;
 }
 ```
 
 ---
 
-## 13. Workflow Pause & Human Review
+## 7. Runtime Dispatch
 
-### Save-as-Skill UX (ControlDeck / CoStaff)
+When a skill is resolved, Cortex routes execution based on `runtime_env`:
 
-After a successful run, the platform surfaces a save prompt:
+```typescript
+async executeSkill(
+  skill: SkillMetadata,
+  inputs: Record<string, unknown>,
+  tenantId: string,
+): Promise<unknown> {
+  // Credential injection for authenticated skills
+  const credentials = skill.authRequirements
+    ? await this.getCredentials(tenantId, skill.id)
+    : undefined;
 
-```
-✅ Workflow completed in 48s
+  switch (skill.runtimeEnv) {
+    case 'llm':
+      return this.executeLLM(skill, inputs);
 
-┌─────────────────────────────────────────────┐
-│  Save this as a reusable skill?             │
-│                                             │
-│  Name:  [ Timon Security Review         ]   │
-│  Slug:  timon-security-review  (auto)       │
-│                                             │
-│  Description:                               │
-│  [ Full Rust repo review: lint, vuln scan, ]│
-│  [ license check, tests, secret detection  ]│
-│                                             │
-│  Visibility:  ● Private  ○ Team  ○ Public   │
-│                                             │
-│  Steps included:                            │
-│  ✓ cargo-git-clone                          │
-│  ✓ cargo-clippy                             │
-│  ✓ cargo-audit                              │
-│  ✓ vault-secret-scanner  (your custom)      │
-│  ✗ cargo-test  (removed by you)             │
-│                                             │
-│  [ Save Skill ]  [ Not now ]               │
-└─────────────────────────────────────────────┘
-```
+    case 'api':
+      return this.executeAPI(skill, inputs, credentials);
 
-On save, Forge's human-distill endpoint is called. It:
-1. Generates alt-queries from the user's description (for Runics embedding)
-2. Computes composite trust: `min(sub-skills) × composition_discount`
-3. Publishes to Runics within seconds
-4. Marks the skill with `source: 'human-distilled'` and a **Human-verified** badge
+    case 'browser':
+      return this.executeBrowser(skill, inputs, credentials);
 
-### Trust Provenance Badges
+    case 'vm':
+      return this.executeVM(skill, inputs, credentials);
 
-```
-[⚡ Composite]  timon-security-review
-Built from 4 skills  •  Human-verified  •  trust: 0.81
-Last run: 2 hours ago  •  Used 3 times this week
+    case 'local':
+      return this.executeLocal(skill, inputs, tenantId);
 
-[🤖 Auto-distilled]  rust-review-pipeline
-Built from 4 skills  •  Agent-generated  •  trust: 0.63
+    default:
+      throw new Error(`Unknown runtime_env: ${skill.runtimeEnv}`);
+  }
+}
 ```
 
-Human-distilled skills get a trust premium signal in ranking. Agents can see both badges and factor them into skill selection reasoning.
+### 7.1 LLM Execution
 
-### The Flywheel
+Inject `skill_md` into LLM context. Call Mastra wrapper.
 
-```
-Week 1: Partner A saves "Timon Security Review"
-Week 2: Partner B runs "check rust codebase" → composite surfaces → runs it
-Week 2: Partner B modifies (adds cargo-deny), saves "Full Rust Compliance Review"
-Week 3: Both composites in registry, covering different intents
-Week 4: Forge sees both used frequently → suggests merging into parameterized skill
-```
-
----
-
-## 14. The Request Lifecycle
-
-### Example: "Review this GitHub Rust repo: github.com/org/timon"
-
-```
-1. USER PROMPT (ControlDeck)
-   "Review this GitHub Rust repo: github.com/org/timon"
-       │
-       ▼
-2. MASTRA SUPERVISOR (plan phase)
-   Goal: comprehensive Rust repo review
-   Planning: clone → lint → audit → licenses → tests → scan → summarize
-       │
-       ▼
-3. RUNICS QUERIES (skill discovery)
-   findSkill("clone a git repository")          → cargo-git-clone     trust: 0.94
-   findSkill("rust linting code quality")       → cargo-clippy        trust: 0.91
-   findSkill("rust dependency vulnerabilities") → cargo-audit         trust: 0.89
-   findSkill("rust license compliance")         → cargo-deny          trust: 0.92
-   findSkill("run rust test suite")             → cargo-test          trust: 0.88
-   findSkill("static security analysis")        → semgrep-rust        trust: 0.85
-       │
-       ▼
-4. PAUSE FOR REVIEW (ControlDeck mode)
-   Plan presented to user — add/remove/reorder steps
-   User removes cargo-test, adds vault-secret-scanner
-   User clicks "Run"
-       │
-       ▼
-5. EXECUTION (single Daytona sandbox)
-   git clone github.com/org/timon         [2.1s]
-   cargo clippy                           [8.3s]  → 3 warnings, 1 error
-   cargo audit                            [4.2s]  → 2 CVEs found
-   cargo deny check licenses              [3.1s]  → 1 GPL conflict
-   vault-secret-scanner                   [5.8s]  → 1 hardcoded secret
-   semgrep-rust                           [6.4s]  → 1 hardcoded secret
-   Sandbox destroyed
-       │
-       ▼
-6. LLM SUMMARY
-   CRITICAL: RUSTSEC-2024-XXXX in serde_yaml, hardcoded API key in src/config.rs:42
-   HIGH: openssl GPL-3.0 license conflict
-   WARNINGS: 3 clippy warnings
-   Recommend: block merge until CRITICAL items resolved
-       │
-       ▼
-7. SAVE PROMPT
-   "Save this as a reusable skill?" → User saves as "Timon Security Review"
-       │
-       ▼
-8. POST-WORKFLOW (async)
-   Forge: human-distill endpoint called
-   Cognium: composite trust computed (0.81)
-   Runics: indexed, searchable within seconds
-   All future "review rust repo" queries surface this composite first
+```typescript
+async executeLLM(skill: SkillMetadata, inputs: Record<string, unknown>) {
+  const response = await this.env.MASTRA_WRAPPER.fetch('/v1/reason', {
+    method: 'POST',
+    body: JSON.stringify({
+      systemPromptAppend: skill.skillMd,
+      messages: [{ role: 'user', content: JSON.stringify(inputs) }],
+    }),
+  });
+  return response.json();
+}
 ```
 
-**Total wall time: ~50 seconds.** The demo shows a single natural-language prompt producing a multi-tool security review, with the user in control of the plan, the result, and the reusable skill it becomes.
+### 7.2 API Execution
 
----
+HTTP call to MCP server or external API.
 
-## 15. Data Model
+```typescript
+async executeAPI(skill: SkillMetadata, inputs: Record<string, unknown>, credentials?: Credentials) {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (credentials?.headers) Object.assign(headers, credentials.headers);
 
-### Core `skills` table additions (v1.1 → v5.0)
-
-```sql
--- Skill lifecycle status
-status TEXT NOT NULL DEFAULT 'published'
-  CHECK (status IN ('draft', 'published', 'deprecated', 'vulnerable', 'revoked', 'degraded', 'contains-vulnerable')),
-revoked_at TIMESTAMPTZ,
-revoked_reason TEXT,                      -- CVE ID or description
-deprecated_at TIMESTAMPTZ,
-deprecated_reason TEXT,
-remediation_message TEXT,                 -- human-readable path forward (from Cognium)
-remediation_url TEXT,                     -- link to advisory
-
--- Skill type and composition
-skill_type TEXT NOT NULL DEFAULT 'atomic'
-  CHECK (skill_type IN ('atomic', 'auto-composite', 'human-composite', 'forked')),
-composition_skill_ids UUID[],             -- denorm array for fast cascade queries
-
--- Version lineage
-version TEXT NOT NULL DEFAULT '1.0.0',
-forked_from TEXT,                         -- 'slug@version' of parent
-forked_by TEXT,                           -- user ID or 'forge'
-fork_changes JSONB,                       -- list of changes from parent
-root_source TEXT,                         -- original registry source (preserved across forks)
-
--- Human distillation
-human_distilled_by TEXT,                  -- user ID
-human_distilled_at TIMESTAMPTZ,
-
--- Cognium attestation fields (latest)
-cognium_findings JSONB,                   -- [{severity, cwe_id, tool, title, description, confidence, verdict}]
-analyzer_summary JSONB,                   -- per-analyzer breakdown
-verification_tier TEXT DEFAULT 'unverified'
-  CHECK (verification_tier IN ('unverified', 'scanned', 'verified', 'certified')),
-scan_coverage TEXT
-  CHECK (scan_coverage IN ('full', 'partial', 'text-only')),
-
--- Trust provenance badge
-trust_badge TEXT CHECK (trust_badge IN ('human-verified', 'auto-distilled', 'upstream', null)),
-
--- Run signal for version ranking
-run_count INTEGER NOT NULL DEFAULT 0,
-last_run_at TIMESTAMPTZ,
+  const response = await fetch(skill.mcpUrl!, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(inputs),
+  });
+  return response.json();
+}
 ```
 
-### Version ranking query
+### 7.3 Browser Execution
 
-Runics surfaces the best version per slug using trust × run signal:
+CF Browser Rendering for interactive web sessions.
 
-```sql
-SELECT DISTINCT ON (slug)
-  id, slug, version, trust_score, run_count, status
-FROM skills
-WHERE slug = :slug
-  AND status NOT IN ('revoked', 'draft')
-  AND (tenant_id IS NULL OR tenant_id = :tenantId)
-ORDER BY slug, (trust_score * 0.7 + LEAST(run_count::float / 100, 0.3)) DESC;
+```typescript
+async executeBrowser(skill: SkillMetadata, inputs: Record<string, unknown>, credentials?: Credentials) {
+  const browser = await this.env.BROWSER.newPage();
+  // Execute browser skill instructions via Stagehand or Playwright
+  // Skill's skill_md contains browser interaction instructions
+  // Returns: action results, page state summary, screenshots as R2 artifacts
+}
+```
+
+### 7.4 VM Execution
+
+CF Sandbox SDK for heavy execution, Dynamic Workers for lightweight.
+
+```typescript
+async executeVM(skill: SkillMetadata, inputs: Record<string, unknown>, credentials?: Credentials) {
+  // Determine: Sandbox (heavy) vs Dynamic Worker (light)
+  const needsFullEnv = skill.capabilitiesRequired?.includes('git')
+    || skill.capabilitiesRequired?.includes('pip')
+    || skill.capabilitiesRequired?.includes('npm');
+
+  if (needsFullEnv) {
+    // CF Sandbox SDK — full Linux environment
+    const sandbox = await this.env.SANDBOX.create();
+    // Clone code, install deps, execute, return results
+    const result = await sandbox.exec(skill.entryCommand, { env: credentials?.envVars });
+    return { stdout: result.stdout, exitCode: result.exitCode };
+  } else {
+    // Dynamic Workers — lightweight V8 isolate (evaluate for future)
+    // For now, fall through to Sandbox
+    const sandbox = await this.env.SANDBOX.create();
+    const result = await sandbox.runCode(skill.codeBundle, { input: inputs });
+    return result;
+  }
+}
+```
+
+### 7.5 Local Execution
+
+Forward to user's machine via Cloudflare Tunnel.
+
+```typescript
+async executeLocal(skill: SkillMetadata, inputs: Record<string, unknown>, tenantId: string) {
+  const tunnelUrl = await this.getTunnelUrl(tenantId);
+  const response = await fetch(`${tunnelUrl}/execute`, {
+    method: 'POST',
+    body: JSON.stringify({ skillId: skill.id, inputs }),
+  });
+  return response.json();
+}
 ```
 
 ---
 
-## 16. Multi-Tenancy
+## 8. Product Session Config
 
-Skills have three visibility levels:
-
-| Visibility | `tenant_id` | Searchable by |
-|---|---|---|
-| Public | NULL | All tenants |
-| Team | tenant_id set | Only that tenant |
-| Private | tenant_id + user_id | Only that user |
-
-Human-distilled composites default to Team visibility. Users explicitly upgrade to Public.
-
----
-
-## 17. Technology Stack
-
-| Component | Technology |
-|---|---|
-| Agent orchestration | Mastra (TypeScript, Cloudflare Workers) |
-| Skill registry | Hono + pgvector (Cloudflare Workers + Neon) |
-| Embeddings | bge-small-en-v1.5 (Workers AI) |
-| Trust scoring | Cognium Client (Cloudflare Workers) + Circle-IR (SAST, external) |
-| Skill distillation | Forge (Cloudflare Queue consumer) |
-| Triggers | Activepieces (self-hosted) |
-| Container execution | Daytona (cloud) |
-| Database | Neon Postgres |
-| Object storage | Cloudflare R2 |
-| Cache | Cloudflare KV |
-| LLM | Claude Sonnet (Anthropic API) |
-
----
-
-## 18. Deployment Architecture
-
-All Cortex components deploy to Cloudflare Workers (serverless, global edge). Neon Postgres is accessed via Hyperdrive for pooled connections. Daytona is called on-demand from Workers. Activepieces runs on a single $10/month VPS.
-
-Nothing is always-on except Activepieces (trigger listener), Postgres, and the Workers runtime itself.
-
----
-
-## 19. Cost Model
-
-| Component | Monthly (100 active users) |
-|---|---|
-| Cloudflare Workers (all services) | ~$5–10 |
-| Neon Postgres | ~$19 (Pro plan) |
-| Daytona (execution containers) | ~$30–80 |
-| Cognium scanning containers | ~$3–5 |
-| Workers AI (embeddings + safety) | ~$2–5 |
-| Anthropic API (Claude Sonnet) | ~$50–150 |
-| Activepieces VPS | ~$10 |
-| **Total** | **~$120–280/month** |
-
-Execution layer routing (65% L0/L1, 20% L2, 15% L3) is the primary cost lever. Moving a skill from L3 to L2 cuts its per-execution cost by ~10,000×.
-
----
-
-## 20. Build Roadmap
-
-| Sprint | Focus | Key Deliverables |
-|---|---|---|
-| Sprint 3a (now) | Runics search | Eval suite hardening, threshold calibration, Phase 2 complete |
-| Sprint 4 | Cognium + Forge | Trust scoring, auto-distillation, human-distill endpoint |
-| Sprint 5 | Cortex runtime | Execution router, Mastra integration, pause/resume |
-| Sprint 6 | ControlDeck | Save-as-skill UX, partner API, composite management |
-| Sprint 7 | Scale & Polish | Versioning UI, revocation cascade, remediation messages |
-
----
-
-## 21. Risks & Mitigations
-
-| Risk | Mitigation |
-|---|---|
-| Runics returns wrong skills in demo | Pre-index the 6 rust review skills with optimized descriptions and alt-queries before any demo |
-| Trust score gaming | Cognium is probabilistic, not proof-of-safety. Daytona sandbox isolation is the last line of defense |
-| Composite degradation false alarms | Only CRITICAL triggers hard revoke + `degraded` cascade. HIGH/MEDIUM sets constituent `vulnerable` + composite `contains-vulnerable`. Different UX treatment — `contains-vulnerable` shows warning badge, `degraded` blocks. |
-| Human-distilled quality | User description drives alt-query embedding quality — bad description → poor discoverability |
-
----
-
-## 22. Open Questions
-
-**Progressive scan:** Should Cognium run a fast partial scan (content safety + basic, ~5s) before the full scan (~60s) to give skills a preliminary trust score faster?
-
-**Composite merge suggestion:** Should Forge suggest merging two similar human-distilled composites into a single parameterized skill when usage patterns converge?
-
-**Manual trust override:** Should workspace admins be able to override Cognium trust scores? Necessary for enterprise (internal tools that fail open-source license checks).
-
----
-
-## 23. Cortex API — Multi-Product Interface
-
-Every product connects to Cortex through a single unified API. The product passes a config object at session creation — Cortex reads it and applies it to all downstream components automatically. This is what makes Cortex a platform, not just internal infrastructure.
-
-### Session Config Shape
+Each product has default configuration, resolved server-side.
 
 ```typescript
 interface CortexSessionConfig {
-  // Identity
-  productId: 'bombastic' | 'costaff' | 'controldeck' | string; // string for external SaaS
-  tenantId: string | null;   // null = personal (Bombastic)
+  productId: string;
+  tenantId: string | null;
   userId: string;
-
-  // System prompt — defines product personality
   systemPrompt: string;
-
-  // Trust appetite — passed directly to Runics search
   appetite: 'strict' | 'cautious' | 'balanced' | 'adventurous';
-  minTrust: number;          // 0.0–1.0
+  minTrust: number;
   allowVulnerable: boolean;
-
-  // Approval behaviour
   approvalMode: 'never' | 'side-effects-only' | 'policy-defined' | 'always';
-
-  // Feature flags
-  policyEngine: boolean;     // CoStaff, ControlDeck only
-  humanReviewGates: boolean; // ControlDeck only
-
-  // Approval timeout — auto-cancel workflow if no response
-  approvalTimeoutMs?: number; // default: none (ControlDeck). Bombastic: 1_800_000 (30 min)
+  modelMap?: Record<string, string>;
+  defaultModel?: string;
 }
 ```
 
-### Product Defaults
-
-```typescript
-// Bombastic — personal assistant (Clove agent)
-// Product defaults resolved server-side — Bombastic sends only productId + userId + messages
-const bombasticConfig: CortexSessionConfig = {
-  productId: 'bombastic',
-  tenantId: null,
-  systemPrompt: "You are Clove, a personal AI agent on the Bombastic platform. Discover capabilities dynamically using findSkill. Only load the skills needed for the current request. When a skill has side effects, always request approval before executing. If a skill is unverified, warn the user before proceeding. Be direct and concise.",
-  appetite: 'balanced',
-  minTrust: 0.50,
-  allowVulnerable: true,
-  approvalMode: 'side-effects-only',
-  policyEngine: false,
-  humanReviewGates: false,
-  approvalTimeoutMs: 1_800_000,    // 30 min — auto-cancel if no response
-};
-
-// CoStaff — business automation
-const costaffConfig: CortexSessionConfig = {
-  productId: 'costaff',
-  tenantId: 'company-abc',   // set per tenant
-  systemPrompt: "You are a business automation agent. Check policies before executing skills. Prefer cautious actions.",
-  appetite: 'cautious',
-  minTrust: 0.70,
-  allowVulnerable: false,
-  approvalMode: 'policy-defined',
-  policyEngine: true,
-  humanReviewGates: false,
-};
-
-// ControlDeck — B2B / partner platform
-const controldeckConfig: CortexSessionConfig = {
-  productId: 'controldeck',
-  tenantId: 'partner-xyz',   // set per partner tenant
-  systemPrompt: "You are a business process automation platform. Plan workflows, present them for human approval, then execute.",
-  appetite: 'cautious',
-  minTrust: 0.70,
-  allowVulnerable: false,
-  approvalMode: 'always',
-  policyEngine: true,
-  humanReviewGates: true,
-};
-```
-
-### What Each Config Field Controls
-
-| Field | Affects |
-|---|---|
-| `systemPrompt` | Mastra agent instructions |
-| `appetite` + `minTrust` + `allowVulnerable` | Runics search filter |
-| `approvalMode` | Whether Mastra pauses before side-effect skills |
-| `approvalTimeoutMs` | Auto-cancel paused workflow after this duration (optional) |
-| `policyEngine` | Whether CoStaff policy check runs pre-execution |
-| `humanReviewGates` | Whether plan is surfaced for review before execution |
-| `tenantId` | Runics skill visibility scope |
-
-**Server-side resolution:** Products send only `productId`, `userId`, and `messages`. Cortex looks up the full config by `productId`. This keeps products thin and prevents config drift across deployments.
+| Product | Appetite | Min Trust | Approval Mode |
+|---|---|---|---|
+| Bombastic | `balanced` | 0.50 | `side-effects-only` |
+| CoStaff | `cautious` | 0.70 | `policy-defined` |
+| ControlDeck | `cautious` | 0.70 | `side-effects-only` |
+| Akrobatos | `strict` | 0.85 | `always` |
 
 ---
 
-## 24. Cortex API — AI SDK Data Stream Protocol
+## 9. Approval Engine
 
-Cortex's `/v1/chat` endpoint emits responses in the **AI SDK Data Stream Protocol** format. This enables AIChatAgent compatibility for all products without any product owning the LLM call directly.
+### 9.1 Approval Flow
 
-### Why This Matters
+When a DAG step has `requiresApproval: true`:
 
-Any product that wraps `AIChatAgent` (Bombastic, CoStaff, ControlDeck, or an external SaaS customer) gets streaming, message persistence, reconnection, and the `useAgentChat` React hook for free — because Cortex speaks the protocol those tools expect.
+1. Executor calls `step.waitForEvent('approval-{stepId}', { timeout: '30 minutes' })`
+2. Cortex pushes an approval request to the product DO via WebSocket
+3. Product surfaces the approval on its board (product-specific UX)
+4. User approves/rejects in the product
+5. Product calls `POST /v1/approvals/:id/approve` or `reject`
+6. API Worker calls `instance.sendEvent({ type: 'approval-{stepId}', payload: { decision } })`
+7. Workflow resumes or skips the step
 
-### Stream Format
+### 9.2 Timeout
 
-Cortex emits newline-delimited chunks in the AI SDK data stream format:
+Default: 30 minutes. Configurable per step via DAG definition (future schema extension). On timeout, the step is skipped and the workflow continues (or fails, depending on `onError`).
 
-```
-// Text chunk
-0:"Hello, I found "
+### 9.3 Routing
 
-// Tool call start (Runics query)
-9:{"toolCallId":"tc-1","toolName":"find-skill","args":{"query":"send email"}}
-
-// Tool result (skill found)
-a:{"toolCallId":"tc-1","result":{"slug":"email-send","trustScore":0.91,"status":"published"}}
-
-// Approval required — data part (reconcilable by id)
-2:[{"type":"approval-required","id":"appr-abc","toolCallId":"tc-1",
-    "skillName":"email-send","trustScore":0.91,
-    "payload":{"to":"john@co.com","subject":"Thursday Brief"}}]
-
-// Text continuation
-0:"I've paused to get your approval before sending."
-
-// Finish
-e:{"finishReason":"tool-calls"}
-d:{"finishReason":"tool-calls"}
-```
-
-### Approval Signal Flow
-
-When Mastra pauses a workflow (side-effect skill, policy gate, or human review gate), Cortex emits an `approval-required` data part before closing the stream. The product's `AIChatAgent` wrapper receives this and persists it to its Durable Object SQLite. How the approval is presented to the user is product-owned — Bombastic renders inline buttons in its SPA; ControlDeck shows a review panel; future products may use WhatsApp, push notifications, or other channels.
-
-```
-Mastra pauses workflow
-        │
-        ▼
-Cortex emits 2:[{type:"approval-required", id:"appr-abc", ...}]
-        │
-        ▼
-AIChatAgent DO persists to SQLite (survives refresh/hibernation)
-        │
-        ▼
-Product renders approval UI (product-owned)
-  ├── Bombastic: inline buttons in SPA at clove.run
-  ├── ControlDeck: review panel with plan editor
-  └── Future: WhatsApp buttons, push notifications, etc.
-        │
-  User approves or rejects (or timeout fires)
-        │
-  POST /approvals/appr-abc/approve (or /reject)
-        │
-  Cortex → Mastra.resume(workflowId) or Mastra.cancel(workflowId)
-        │
-  Stream resumes → completion (or cancellation message)
-```
-
-If `approvalTimeoutMs` is set in the product config, Cortex auto-cancels the paused workflow after that duration and emits a timeout data part.
-
-### Cortex Endpoint Summary
-
-```
-POST /v1/chat                    Start or continue a session, returns data stream
-POST /v1/approvals/:id/approve   Resume a paused workflow
-POST /v1/approvals/:id/reject    Cancel a paused workflow
-GET  /v1/sessions/:id/state      Current session state (for reconnect)
-GET  /health                     Service health
-```
+Cortex emits approval events. Products own routing (which user sees the approval, escalation policies, batching). This is product-specific RBAC, not Cortex's concern.
 
 ---
 
-## 25. Product Wrapper Pattern (Bombastic Example)
+## 10. Forge — Internal Trace Capture
 
-Each product is a thin `AIChatAgent` subclass. It does not own the LLM call — it proxies to Cortex and pipes the data stream back. Products send only identity fields; Cortex resolves the full config server-side.
+### 10.1 What Forge Does
+
+Captures execution traces from completed workflows. Distills them into reusable skills (published to Runics). Skills only — not knowledge artifacts.
+
+### 10.2 How It Works
+
+1. CortexDAGExecutor's final step sends trace to `FORGE_QUEUE`
+2. Forge queue consumer processes traces asynchronously
+3. Reusability judge evaluates trace quality
+4. If reusable, distiller generates a new skill definition
+5. Skill published to Runics as `source: 'forge'`
+
+### 10.3 Trace Schema
 
 ```typescript
-// bombastic/src/agent.ts
+interface ForgeTrace {
+  workflowId: string;
+  dag: WorkflowDAG;
+  outputs: Record<string, unknown>;
+  tenantId: string;
+  userId: string;
+  completedAt: string;
+  steps: ForgeTraceStep[];
+}
 
-export class BombasticAgent extends AIChatAgent<Env> {
-
-  // 1. Proxy to Cortex, pipe AI SDK data stream back
-  async onChatMessage(onFinish) {
-    return createDataStreamResponse({
-      execute: async (dataStream) => {
-        try {
-          const res = await fetch(`${this.env.CORTEX_URL}/v1/chat`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${this.env.CORTEX_API_KEY}`,
-            },
-            body: JSON.stringify({
-              productId: 'bombastic',
-              userId: this.name,           // DO instance name = session ID
-              messages: this.messages,
-            }),
-          });
-
-          if (!res.ok) {
-            dataStream.writeData([{
-              type: 'error',
-              message: 'Something went wrong. Please try again.',
-            }]);
-            return;
-          }
-
-          // Pipe Cortex data stream → AIChatAgent data stream
-          await pipeDataStream(res.body, dataStream);
-        } catch (err) {
-          dataStream.writeData([{
-            type: 'error',
-            message: 'Could not reach Clove\'s brain. Please try again in a moment.',
-          }]);
-        }
-      },
-      onFinish,
-    });
-  }
-
-  // 2. Resume endpoint — called by SPA inline approval buttons
-  //    (v1.1: also called by WhatsApp webhook via Activepieces)
-  @callable()
-  async resolveApproval(approvalId: string, decision: 'approve' | 'reject') {
-    await fetch(`${this.env.CORTEX_URL}/v1/approvals/${approvalId}/${decision}`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${this.env.CORTEX_API_KEY}` },
-    });
-    await this.setState({ pendingApproval: null });
-  }
+interface ForgeTraceStep {
+  stepId: string;
+  skillSlug: string;
+  skillVersion: string;
+  runtimeEnv: string;
+  input: Record<string, unknown>;
+  output: unknown;
+  durationMs: number;
+  success: boolean;
 }
 ```
 
-**What this pattern gives every product:**
-- WebSocket management — free via AIChatAgent
-- Message persistence (SQLite in DO) — free via AIChatAgent
-- Stream reconnection across page refresh — free via AIChatAgent
-- `useAgentChat` React hook for web UI — free
-- Mobile v2 WebSocket client connects to same DO — no backend change needed
-- Approval state survives DO hibernation — free via needsApproval persistence
+### 10.4 DAG vs Trace
 
-**What Cortex owns:** Mastra orchestration, Runics search, Cognium trust, Forge distillation, skill execution, product config resolution.
-
-**What the product owns:** UI, approval presentation (inline buttons, WhatsApp, push, etc.), and the `@callable` resume endpoint.
-
-New products — including external SaaS customers using Cortex as a platform — follow the same pattern. Different `productId`, different UI, same runtime.
+The DAG is built by Cortex at decomposition time — it's the *plan*. The trace is captured after execution — it's *what happened*. When a user saves a workflow, Cortex publishes the DAG (the plan that worked). Forge captures the trace for analytics and quality improvement.
 
 ---
 
-*Cortex is the runtime. Clove is the agent. ControlDeck is the platform. Skills are the currency. — Cognium Labs*
+## 11. Mastra Wrapper
+
+### 11.1 What It Is
+
+A stateless LLM reasoning service. Separate Cloudflare Worker connected to Cortex via service binding.
+
+### 11.2 What It Does
+
+- Mastra orchestration with system prompt + model routing
+- Conversation memory (per userId + conversationId via Mastra sessions)
+- `emit_decomposition` tool — expanded to emit DAG structure with dependencies and input mappings. See `runics-dag-specification.md` §5.1 for the complete tool schema. The LLM returns steps with `dependsOn` hints and `skillQuery`; Cortex's DAG builder (§5.2 in the DAG spec) resolves these into a proper `WorkflowDAG`.
+- LLM calls routed through existing LLM proxy
+
+### 11.3 API (Internal Only)
+
+```typescript
+// Called by Cortex via service binding — not a public API
+interface MastraRequest {
+  productId: string;
+  userId: string;
+  conversationId: string;
+  messages: Message[];
+  context?: Record<string, unknown>;
+  model?: string;
+  systemPromptAppend?: string;  // for skill_md injection
+}
+```
+
+### 11.4 Size
+
+~300 lines. Mastra initialization + system prompt + model map + the `emit_decomposition` tool definition. No execution logic, no approval state, no skill dispatch.
+
+---
+
+## 12. Credential Vault
+
+Forked MCP skills may point to a user's own service instances. Credentials stored per-tenant in KV, encrypted at rest.
+
+```typescript
+// KV key: credentials:{tenantId}:{skillId}
+interface SkillCredentials {
+  headers?: Record<string, string>;
+  cookies?: Array<{ name: string; value: string; domain: string }>;
+  envVars?: Record<string, string>;
+  oauthToken?: {
+    accessToken: string;
+    refreshToken?: string;
+    expiresAt?: number;
+  };
+}
+```
+
+Credentials never stored in skill records. Cognium Config Analyzer flags hardcoded secrets. Credential injection happens in the executor, per step, scoped to tenant.
+
+---
+
+## 13. Skill Revocation Handling
+
+When Runics emits a skill revocation event:
+
+1. Cortex receives the event (via webhook or queue)
+2. Cortex identifies affected running workflow instances (by scanning active instances for the revoked skill ID)
+3. Cortex pushes notification to product DOs via WebSocket
+4. Each product handles per its own logic (pause, notify, auto-substitute)
+
+For static-binding workflows referencing the revoked skill: the next execution of that step will fail with a trust check error. The product can update the DAG to reference a patched version.
+
+---
+
+## 14. Deployment
+
+### Environments
+
+| Environment | URL | CF Account | Config File |
+|-------------|-----|------------|-------------|
+| **Production** | `https://cortex.cognium.net` | cognium (`bb8e02ea0ca7c225d2fb62d24a9940be`) | `wrangler.production.toml` |
+| **Staging** | `https://cortex.phantoms.workers.dev` | phantoms (`1f59f4dcd0ebb559e3c392566978d446`) | `wrangler.toml` |
+
+### Deploy Commands
+
+```bash
+# Staging
+npx wrangler deploy
+
+# Production
+npx wrangler deploy -c wrangler.production.toml
+```
+
+### Production Resources
+
+| Resource | ID/Name |
+|----------|---------|
+| Neon DB | `ep-lucky-sound-akb7l8dj` (us-west-2) |
+| Hyperdrive | `c9aee067341446239e483dbf6df25f96` |
+| KV SESSION_CACHE | `d827ec6be74641ee8fa53a0af4cd7e1b` |
+| KV WORKFLOW_STATE | `d4180b7f747f47baa0c36f24b75dd0ef` |
+| R2 | `cortex-artifacts` |
+| Runics Service | `runics` (service binding) |
+
+### Secrets
+
+```bash
+npx wrangler secret put LLMPROXY_API_KEY -c wrangler.production.toml
+npx wrangler secret put DATABASE_URL -c wrangler.production.toml
+npx wrangler secret put ADMIN_SECRET -c wrangler.production.toml
+```
+
+### Wrangler Configuration
+
+See `wrangler.toml` (staging) and `wrangler.production.toml` (production) for full config.
+
+Key bindings:
+- `WORKFLOW_DO` — Durable Object for workflow state
+- `SESSION_CACHE` / `WORKFLOW_STATE` — KV namespaces
+- `HYPERDRIVE` — Neon Postgres connection pool
+- `R2_BUCKET` — Artifact storage
+- `RUNICS_SERVICE` — Service binding to Runics worker
+- `ANALYTICS` — Analytics Engine dataset
+- `AI` — Workers AI
+
+---
+
+## 15. MVP Native Connectors
+
+Activepieces connectors are imported as code (npm packages). For MVP, build critical connectors natively using `ofetch` inside Workers. Full Activepieces catalog integration is deferred until 200+ connectors are needed.
+
+### MVP Connector List
+
+| Connector | Use case | Priority |
+|---|---|---|
+| Web fetch / HTTP | Generic API calls, web scraping | P0 |
+| Email (send) | Compose and send emails | P0 |
+| Email (read) | Parse incoming email content | P1 |
+| Google Calendar | Create/read/update events | P0 |
+| Slack | Send messages, read channels | P0 |
+| GitHub | Issues, PRs, repos, webhooks | P0 |
+| Google Docs/Sheets | Read/write documents | P1 |
+| Stripe | Payment processing, invoices | P1 |
+| Jira | Issue tracking, project management | P1 |
+| PagerDuty | Incident management (Akrobatos) | P1 |
+| Datadog | Monitoring/metrics (Akrobatos) | P1 |
+| Twilio / WhatsApp | SMS and messaging | P2 |
+| Notion | Knowledge base, docs | P2 |
+| Linear | Issue tracking (dev teams) | P2 |
+| Salesforce | CRM (CoStaff) | P2 |
+
+Each connector is a Workers-compatible module: `ofetch` for HTTP, Zod for response validation, typed input/output schemas matching Runics skill conventions.
+
+---
+
+## 16. Project Structure
+
+```
+cortex/
+├── wrangler.toml
+├── package.json
+├── src/
+│   ├── index.ts                    # Worker entry, Hono router
+│   ├── workflows/
+│   │   └── dag-executor.ts         # CortexDAGExecutor (CF Workflow class)
+│   ├── runtime/
+│   │   ├── dispatch.ts             # Runtime dispatch by runtime_env
+│   │   ├── llm.ts                  # LLM execution (via Mastra)
+│   │   ├── api.ts                  # API/MCP execution
+│   │   ├── browser.ts              # Browser Rendering execution
+│   │   ├── vm.ts                   # Sandbox SDK / Dynamic Workers
+│   │   └── local.ts                # Local tunnel execution
+│   ├── api/
+│   │   ├── chat.ts                 # POST /v1/chat handler
+│   │   ├── workflows.ts           # Workflow CRUD handlers
+│   │   ├── approvals.ts           # Approval handlers
+│   │   └── webhooks.ts            # Webhook routing handler
+│   ├── forge/
+│   │   ├── consumer.ts            # Queue consumer for traces
+│   │   ├── judge.ts               # Reusability judge
+│   │   └── distiller.ts           # Trace → skill distillation
+│   ├── credentials/
+│   │   └── vault.ts               # KV credential management
+│   ├── config/
+│   │   └── products.ts            # Product session configs
+│   └── types.ts                   # Shared types
+├── tests/
+│   ├── dag-executor.test.ts
+│   ├── runtime.test.ts
+│   ├── api.test.ts
+│   └── forge.test.ts
+└── mastra-wrapper/                # Separate Worker
+    ├── wrangler.toml
+    ├── src/
+    │   ├── index.ts               # Mastra init + routing
+    │   ├── tools.ts               # emit_decomposition tool
+    │   └── config.ts              # System prompts, model maps
+    └── tests/
+        └── reasoning.test.ts
+```
+
+---
+
+## 17. Migration from v1.5
+
+| v1.5 Component | v2.0 Equivalent | Action |
+|---|---|---|
+| Mastra orchestration in Cortex | Mastra wrapper (separate Worker) | Extract |
+| `invokeSkill` dispatch | `executeSkill` in DAG executor | Rewrite |
+| Runics search integration | Called from `resolveSkill` in executor | Move |
+| Cognium trust gating | Read cached score from skill metadata | Simplify |
+| Approval flow via DO | `step.waitForEvent` + `sendEvent` | Replace |
+| Forge as peer service | Internal queue consumer | Absorb |
+| Credential vault (KV) | Unchanged | Keep |
+| Session memory (DO) | Mastra sessions in wrapper | Move |
+| `POST /v1/chat` | Backward compatible | Keep |
+| Execution dispatch table | Updated with Sandbox SDK + Dynamic Workers | Update |
