@@ -27,25 +27,21 @@ tag = "v1"
 new_sqlite_classes = ["WorkflowDurableObject"]
 
 # --- KV Namespaces ---
-# Create with: npx wrangler kv:namespace create SESSION_CACHE -c wrangler.production.toml
-# Create with: npx wrangler kv:namespace create WORKFLOW_STATE -c wrangler.production.toml
 [[kv_namespaces]]
 binding = "SESSION_CACHE"
-id = "REPLACE_WITH_PROD_SESSION_CACHE_ID"
+id = "d827ec6be74641ee8fa53a0af4cd7e1b"
 
 [[kv_namespaces]]
 binding = "WORKFLOW_STATE"
-id = "REPLACE_WITH_PROD_WORKFLOW_STATE_ID"
+id = "d4180b7f747f47baa0c36f24b75dd0ef"
 
 # --- Hyperdrive (Neon Postgres) ---
-# Create with: npx wrangler hyperdrive create cortex-db -c wrangler.production.toml --connection-string="postgres://..."
 [[hyperdrive]]
 binding = "HYPERDRIVE"
-id = "REPLACE_WITH_PROD_HYPERDRIVE_ID"
+id = "c9aee067341446239e483dbf6df25f96"
 localConnectionString = "${DATABASE_URL}"
 
 # --- R2 ---
-# Create with: npx wrangler r2 bucket create cortex-artifacts -c wrangler.production.toml
 [[r2_buckets]]
 binding = "R2_BUCKET"
 bucket_name = "cortex-artifacts"
