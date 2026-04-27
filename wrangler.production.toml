@@ -1,13 +1,18 @@
 # =============================================================================
-# STAGING - cortex.phantoms.workers.dev
-# Deploy: npx wrangler deploy
-# Account: phantoms (1f59f4dcd0ebb559e3c392566978d446)
+# PRODUCTION - cortex.cognium.net
+# Deploy: npx wrangler deploy -c wrangler.production.toml
+# Account: cognium (REPLACE_WITH_COGNIUM_ACCOUNT_ID)
 # =============================================================================
 
 name = "cortex"
 main = "src/index.ts"
 compatibility_date = "2025-02-01"
 compatibility_flags = ["nodejs_compat"]
+account_id = "bb8e02ea0ca7c225d2fb62d24a9940be"
+
+routes = [
+  { pattern = "cortex.cognium.net", custom_domain = true }
+]
 
 [observability]
 enabled = true
@@ -22,26 +27,31 @@ tag = "v1"
 new_sqlite_classes = ["WorkflowDurableObject"]
 
 # --- KV Namespaces ---
+# Create with: npx wrangler kv:namespace create SESSION_CACHE -c wrangler.production.toml
+# Create with: npx wrangler kv:namespace create WORKFLOW_STATE -c wrangler.production.toml
 [[kv_namespaces]]
 binding = "SESSION_CACHE"
-id = "41f4c080699548b78d8268dae976050f"
+id = "REPLACE_WITH_PROD_SESSION_CACHE_ID"
 
 [[kv_namespaces]]
 binding = "WORKFLOW_STATE"
-id = "25de6e1a514e43f58ef7e4be921f3a43"
+id = "REPLACE_WITH_PROD_WORKFLOW_STATE_ID"
 
 # --- Hyperdrive (Neon Postgres) ---
+# Create with: npx wrangler hyperdrive create cortex-db -c wrangler.production.toml --connection-string="postgres://..."
 [[hyperdrive]]
 binding = "HYPERDRIVE"
-id = "f61c21a7e1204ce4942c591cfe663b23"
+id = "REPLACE_WITH_PROD_HYPERDRIVE_ID"
 localConnectionString = "${DATABASE_URL}"
 
 # --- R2 ---
+# Create with: npx wrangler r2 bucket create cortex-artifacts -c wrangler.production.toml
 [[r2_buckets]]
 binding = "R2_BUCKET"
 bucket_name = "cortex-artifacts"
 
 # --- Service Bindings ---
+# Note: Service binding must be in same account, so Runics must also be deployed to cognium account
 [[services]]
 binding = "RUNICS_SERVICE"
 service = "runics"
@@ -57,8 +67,8 @@ dataset = "cortex_metrics"
 
 # --- Environment Variables ---
 [vars]
-ENVIRONMENT = "staging"
-RUNICS_URL = "https://runics.phantoms.workers.dev"
+ENVIRONMENT = "production"
+RUNICS_URL = "https://runics.cognium.net"
 DAYTONA_TARGET = "us"
 DAYTONA_API_URL = "https://app.daytona.io/api"
 LLMPROXY_URL = "https://llmproxy.xus.one"
@@ -67,7 +77,7 @@ DEFAULT_EXECUTION_MODE = "review_before_run"
 DEFAULT_APPETITE = "balanced"
 WORKFLOW_TIMEOUT_MS = "300000"
 MAX_SKILL_CHAIN_DEPTH = "10"
-CF_ACCOUNT_ID = "1f59f4dcd0ebb559e3c392566978d446"
+CF_ACCOUNT_ID = "bb8e02ea0ca7c225d2fb62d24a9940be"
 
 # --- Cron Triggers ---
 [triggers]
