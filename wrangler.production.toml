@@ -64,7 +64,7 @@ dataset = "cortex_metrics"
 # --- Environment Variables ---
 [vars]
 ENVIRONMENT = "production"
-RUNICS_URL = "https://runics.cognium.net"
+RUNICS_URL = "https://api.runics.net"
 DAYTONA_TARGET = "us"
 DAYTONA_API_URL = "https://app.daytona.io/api"
 LLMPROXY_URL = "https://llmproxy.xus.one"
