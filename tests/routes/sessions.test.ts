@@ -42,7 +42,7 @@ function makeMockEnv(): Env {
       tenantId: "t1",
       userId: "u1",
       product: "bombastic",
-      scopes: ["run", "sessions"],
+      scopes: ["workflows", "sessions"],
       createdAt: new Date().toISOString(),
     }),
   );
@@ -99,7 +99,7 @@ describe("Session Routes", () => {
           tenantId: "t1",
           userId: "u1",
           product: "bombastic",
-          scopes: ["run", "sessions"],
+          scopes: ["workflows", "sessions"],
           createdAt: new Date().toISOString(),
         });
       }
@@ -339,7 +339,7 @@ describe("Session Routes", () => {
             tenantId: "t1",
             userId: "u1",
             product: "bombastic",
-            scopes: ["run", "sessions"],
+            scopes: ["workflows", "sessions"],
             createdAt: new Date().toISOString(),
           });
         }

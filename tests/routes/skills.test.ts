@@ -31,7 +31,7 @@ function makeMockEnv(): Env {
       tenantId: "t1",
       userId: "u1",
       product: "bombastic",
-      scopes: ["run", "sessions", "skills"],
+      scopes: ["workflows", "sessions", "skills"],
       createdAt: new Date().toISOString(),
     }),
   );
@@ -128,7 +128,7 @@ describe("Composite Skill Routes", () => {
           tenantId: "t1",
           userId: "u1",
           product: "bombastic",
-          scopes: ["run", "sessions"],
+          scopes: ["workflows", "sessions"],
           createdAt: new Date().toISOString(),
         }),
       );

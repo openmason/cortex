@@ -37,7 +37,37 @@ app.onError((err, c) => {
 // ---------------------------------------------------------------------------
 // Middleware
 // ---------------------------------------------------------------------------
-app.use("*", cors());
+
+// CORS — environment-based configuration
+app.use("*", async (c, next) => {
+  const env = c.env.ENVIRONMENT;
+  const allowedOrigins = c.env.CORS_ALLOWED_ORIGINS;
+
+  // Production: strict allowlist from env var (comma-separated)
+  // Staging/dev: allow all origins
+  if (env === "production" && allowedOrigins) {
+    const origins = allowedOrigins.split(",").map((o) => o.trim());
+    const origin = c.req.header("Origin");
+
+    if (origin && origins.includes(origin)) {
+      c.header("Access-Control-Allow-Origin", origin);
+      c.header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+      c.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID");
+      c.header("Access-Control-Allow-Credentials", "true");
+      c.header("Access-Control-Max-Age", "86400");
+    }
+
+    if (c.req.method === "OPTIONS") {
+      return c.text("", 204);
+    }
+
+    return next();
+  }
+
+  // Non-production: use permissive CORS
+  return cors()(c, next);
+});
+
 app.use("*", logger());
 
 // Request ID — propagate or generate
@@ -50,6 +80,9 @@ app.use("*", async (c, next) => {
 
 app.use("/v1/*", authMiddleware);
 app.use("/v1/*", usageTrackingMiddleware);
+// Rate limiting: primary /workflows routes + deprecated /run aliases + chat
+app.use("/v1/workflows", rateLimitMiddleware);
+app.use("/v1/workflows/*", rateLimitMiddleware);
 app.use("/v1/run", rateLimitMiddleware);
 app.use("/v1/run/*", rateLimitMiddleware);
 app.use("/v1/chat", rateLimitMiddleware);

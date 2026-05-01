@@ -31,7 +31,7 @@ function makeMockEnv(): Env {
     tenantId: "t1",
     userId: "u1",
     product: "bombastic",
-    scopes: ["run", "sessions"],
+    scopes: ["workflows", "sessions"],
     createdAt: new Date().toISOString(),
   }));
 
@@ -177,10 +177,10 @@ describe("API Routes", () => {
     });
   });
 
-  describe("POST /v1/run", () => {
+  describe("POST /v1/workflows", () => {
     it("should reject invalid requests", async () => {
       const res = await app.fetch(
-        new Request("http://localhost/v1/run", {
+        new Request("http://localhost/v1/workflows", {
           method: "POST",
           headers: { ...authHeaders(), "Content-Type": "application/json" },
           body: JSON.stringify({}),
@@ -196,7 +196,7 @@ describe("API Routes", () => {
 
     it("should reject invalid conversationId format", async () => {
       const res = await app.fetch(
-        new Request("http://localhost/v1/run", {
+        new Request("http://localhost/v1/workflows", {
           method: "POST",
           headers: { ...authHeaders(), "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -232,7 +232,7 @@ describe("API Routes", () => {
       }));
 
       const res = await app.fetch(
-        new Request("http://localhost/v1/run", {
+        new Request("http://localhost/v1/workflows", {
           method: "POST",
           headers: { ...authHeaders(), "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -251,7 +251,7 @@ describe("API Routes", () => {
 
     it("should reject invalid product names", async () => {
       const res = await app.fetch(
-        new Request("http://localhost/v1/run", {
+        new Request("http://localhost/v1/workflows", {
           method: "POST",
           headers: { ...authHeaders(), "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -338,7 +338,7 @@ describe("API Routes", () => {
       }));
 
       const res = await app.fetch(
-        new Request("http://localhost/v1/run", {
+        new Request("http://localhost/v1/workflows", {
           method: "POST",
           headers: { ...authHeaders(), "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -358,10 +358,10 @@ describe("API Routes", () => {
     });
   });
 
-  describe("GET /v1/run/:workflowId", () => {
+  describe("GET /v1/workflows/:workflowId", () => {
     it("should return 404 for non-existent workflow", async () => {
       const res = await app.fetch(
-        new Request("http://localhost/v1/run/nonexistent-id", {
+        new Request("http://localhost/v1/workflows/nonexistent-id", {
           headers: authHeaders(),
         }),
         env,
@@ -381,7 +381,7 @@ describe("API Routes", () => {
       await (env.WORKFLOW_STATE as any).put("workflow:wf-123", JSON.stringify(state));
 
       const res = await app.fetch(
-        new Request("http://localhost/v1/run/wf-123", {
+        new Request("http://localhost/v1/workflows/wf-123", {
           headers: authHeaders(),
         }),
         env,
@@ -395,10 +395,10 @@ describe("API Routes", () => {
     });
   });
 
-  describe("POST /v1/run/:workflowId/resume", () => {
+  describe("POST /v1/workflows/:workflowId/resume", () => {
     it("should reject invalid resume requests", async () => {
       const res = await app.fetch(
-        new Request("http://localhost/v1/run/wf-123/resume", {
+        new Request("http://localhost/v1/workflows/wf-123/resume", {
           method: "POST",
           headers: { ...authHeaders(), "Content-Type": "application/json" },
           body: JSON.stringify({}),
@@ -408,6 +408,86 @@ describe("API Routes", () => {
       );
 
       expect(res.status).toBe(400);
+    });
+  });
+
+  describe("POST /v1/workflows/:workflowId/terminate", () => {
+    it("should return 404 for non-existent workflow", async () => {
+      const res = await app.fetch(
+        new Request("http://localhost/v1/workflows/nonexistent-wf/terminate", {
+          method: "POST",
+          headers: { ...authHeaders(), "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        }),
+        env,
+        ctx,
+      );
+
+      expect(res.status).toBe(404);
+    });
+
+    it("should terminate a running workflow", async () => {
+      // Seed a workflow in running state
+      const workflowId = "wf-terminate-test";
+      const state = {
+        workflowId,
+        tenantId: "t1",
+        userId: "u1",
+        product: "bombastic",
+        mode: "full_auto",
+        plan: { id: workflowId, mode: "full_auto", steps: [] },
+        currentStepIndex: 0,
+        status: "running",
+        startedAt: new Date().toISOString(),
+      };
+      await env.WORKFLOW_STATE.put(`workflow:${workflowId}`, JSON.stringify(state));
+
+      const res = await app.fetch(
+        new Request(`http://localhost/v1/workflows/${workflowId}/terminate`, {
+          method: "POST",
+          headers: { ...authHeaders(), "Content-Type": "application/json" },
+          body: JSON.stringify({ reason: "Test termination" }),
+        }),
+        env,
+        ctx,
+      );
+
+      expect(res.status).toBe(200);
+      const body = await res.json() as any;
+      expect(body.status).toBe("terminated");
+      expect(body.error).toBe("Test termination");
+    });
+
+    it("should return 409 for already completed workflow", async () => {
+      // Seed a workflow in completed state
+      const workflowId = "wf-completed-test";
+      const state = {
+        workflowId,
+        tenantId: "t1",
+        userId: "u1",
+        product: "bombastic",
+        mode: "full_auto",
+        plan: { id: workflowId, mode: "full_auto", steps: [] },
+        currentStepIndex: 0,
+        status: "completed",
+        startedAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+      };
+      await env.WORKFLOW_STATE.put(`workflow:${workflowId}`, JSON.stringify(state));
+
+      const res = await app.fetch(
+        new Request(`http://localhost/v1/workflows/${workflowId}/terminate`, {
+          method: "POST",
+          headers: { ...authHeaders(), "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        }),
+        env,
+        ctx,
+      );
+
+      expect(res.status).toBe(409);
+      const body = await res.json() as any;
+      expect(body.error).toContain("already in terminal state");
     });
   });
 
@@ -456,10 +536,10 @@ describe("API Routes", () => {
     });
   });
 
-  describe("POST /v1/run/:workflowId/save", () => {
+  describe("POST /v1/workflows/:workflowId/save", () => {
     it("should reject save with missing fields", async () => {
       const res = await app.fetch(
-        new Request("http://localhost/v1/run/wf-123/save", {
+        new Request("http://localhost/v1/workflows/wf-123/save", {
           method: "POST",
           headers: { ...authHeaders(), "Content-Type": "application/json" },
           body: JSON.stringify({ name: "x" }),

@@ -374,6 +374,43 @@ export class WorkflowEngine {
     return state;
   }
 
+  /**
+   * Terminate a running or paused workflow.
+   * Can only terminate workflows that are not already in a terminal state.
+   */
+  async terminate(state: WorkflowState, reason?: string): Promise<WorkflowState> {
+    const terminalStatuses: WorkflowStatus[] = ["completed", "failed", "timed_out", "terminated"];
+    if (terminalStatuses.includes(state.status)) {
+      // Already in terminal state, return as-is
+      return state;
+    }
+
+    state.status = "terminated";
+    state.error = reason ?? "Workflow terminated by user";
+    state.completedAt = new Date().toISOString();
+    await this.persistState(state);
+
+    // Update DB (best-effort, non-blocking)
+    if (this.repo) {
+      Promise.resolve(this.repo.updateSession(state)).catch((err) =>
+        this.log?.error("Failed to update terminated session in DB", {
+          error: err instanceof Error ? err.message : String(err),
+          workflowId: state.workflowId,
+        }),
+      );
+    }
+
+    this.log?.info("Workflow terminated", { workflowId: state.workflowId, reason });
+    this.metrics?.write("workflow", {
+      tenantId: state.tenantId,
+      product: state.product,
+      status: "terminated",
+      durationMs: Date.now() - new Date(state.startedAt).getTime(),
+    });
+
+    return state;
+  }
+
   private getTimeoutMs(): number {
     return parseInt(this.env.WORKFLOW_TIMEOUT_MS, 10) || 300_000;
   }

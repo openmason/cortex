@@ -28,6 +28,7 @@ export interface Env {
 
   // Vars
   ENVIRONMENT: string;
+  CORS_ALLOWED_ORIGINS?: string; // Comma-separated list of allowed origins (production only)
   RUNICS_URL: string;
   DAYTONA_TARGET: string;
   DAYTONA_API_URL: string;
@@ -69,6 +70,7 @@ export interface AppVariables {
   product: Product;
   scopes: string[];
   requestId: string;
+  apiKeyPrefix: string; // First 12 chars of API key for rate limiting/tracking
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +161,85 @@ export interface WorkflowStep {
 
 export type StepStatus = "pending" | "running" | "completed" | "failed" | "skipped" | "paused";
 
+// ---------------------------------------------------------------------------
+// DAG Workflow (spec v2.0)
+// ---------------------------------------------------------------------------
+
+/**
+ * WorkflowDAG — DAG-based workflow definition per @runics/dag format.
+ * Supports parallel execution, conditional branching, and dependency tracking.
+ */
+export interface WorkflowDAG {
+  id: string;
+  steps: DAGStep[];
+  mode: ExecutionMode;
+  createdAt: string;
+  /** Optional metadata */
+  name?: string;
+  description?: string;
+}
+
+/**
+ * DAGStep — A single step in a DAG workflow with dependency support.
+ */
+export interface DAGStep {
+  id: string;
+  /** Step IDs that must complete before this step runs */
+  dependsOn?: string[];
+  /** Skill binding mode */
+  binding: "static" | "dynamic";
+  /** Skill reference: slug@version for static, natural language query for dynamic */
+  skillRef: string;
+  /** Resolved skill (populated at execution time) */
+  skill?: SkillReference;
+  /** Input mapping with template expressions ($prev, $step.N, $context) */
+  inputMapping?: Record<string, unknown>;
+  /** Condition expression — step runs only if evaluated to true */
+  condition?: DAGCondition;
+  /** Error handling strategy */
+  onError: "fail" | "skip" | "retry";
+  /** Retry configuration (required if onError is 'retry') */
+  retry?: RetryConfig;
+  /** Whether this step requires human approval before execution */
+  requiresApproval?: boolean;
+  /** Step execution status */
+  status: StepStatus;
+  /** Execution result after completion */
+  result?: ExecutionResult;
+}
+
+/**
+ * DAGCondition — Condition expression for conditional step execution.
+ * Supports simple expressions evaluated against workflow outputs.
+ */
+export interface DAGCondition {
+  /** Expression type */
+  type: "expression" | "jmespath";
+  /** Expression string (e.g., "$step.0.result.success === true") */
+  expr: string;
+}
+
+/**
+ * RetryConfig — Per-step retry configuration.
+ */
+export interface RetryConfig {
+  /** Maximum retry attempts */
+  count: number;
+  /** Delay between retries in milliseconds */
+  delayMs: number;
+  /** Backoff strategy */
+  backoff?: "linear" | "exponential";
+}
+
+/**
+ * ExecutionLayer — A group of DAG steps that can execute in parallel.
+ * Steps in the same layer have no interdependencies.
+ */
+export interface ExecutionLayer {
+  index: number;
+  stepIds: string[];
+}
+
 export interface WorkflowState {
   workflowId: string;
   tenantId: string;
@@ -177,7 +258,7 @@ export interface WorkflowState {
   conversationId?: string;
 }
 
-export type WorkflowStatus = "planning" | "paused_for_review" | "running" | "paused_at_step" | "completed" | "failed" | "timed_out";
+export type WorkflowStatus = "planning" | "paused_for_review" | "running" | "paused_at_step" | "completed" | "failed" | "timed_out" | "terminated";
 
 // ---------------------------------------------------------------------------
 // Products

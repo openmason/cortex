@@ -7,8 +7,8 @@ import { Metrics } from "../observability/metrics";
 
 const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
-// Scope enforcement
-app.use("/approvals/*", requireScope("run"));
+// Scope enforcement — approvals relate to workflows
+app.use("/approvals/*", requireScope("workflows"));
 
 // ---------------------------------------------------------------------------
 // POST /v1/approvals/:id/approve — Approve a paused workflow

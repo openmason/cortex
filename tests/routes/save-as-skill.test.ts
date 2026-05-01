@@ -32,7 +32,7 @@ function makeMockEnv(): Env {
       tenantId: "t1",
       userId: "u1",
       product: "bombastic",
-      scopes: ["run", "sessions"],
+      scopes: ["workflows", "sessions"],
       createdAt: new Date().toISOString(),
     }),
   );
@@ -122,7 +122,7 @@ function seedWorkflow(env: Env, workflowId: string, overrides: Record<string, un
   return state;
 }
 
-describe("POST /v1/run/:workflowId/save", () => {
+describe("POST /v1/workflows/:workflowId/save", () => {
   let env: Env;
   const ctx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
 
@@ -133,7 +133,7 @@ describe("POST /v1/run/:workflowId/save", () => {
 
   it("should reject missing required fields", async () => {
     const res = await app.fetch(
-      new Request("http://localhost/v1/run/wf-1/save", {
+      new Request("http://localhost/v1/workflows/wf-1/save", {
         method: "POST",
         headers: { ...authHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify({ name: "x" }),
@@ -147,7 +147,7 @@ describe("POST /v1/run/:workflowId/save", () => {
 
   it("should reject description that is too short", async () => {
     const res = await app.fetch(
-      new Request("http://localhost/v1/run/wf-1/save", {
+      new Request("http://localhost/v1/workflows/wf-1/save", {
         method: "POST",
         headers: { ...authHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify({ name: "Test", description: "short" }),
@@ -164,7 +164,7 @@ describe("POST /v1/run/:workflowId/save", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) }));
 
     const res = await app.fetch(
-      new Request("http://localhost/v1/run/nonexistent/save", {
+      new Request("http://localhost/v1/workflows/nonexistent/save", {
         method: "POST",
         headers: { ...authHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -186,7 +186,7 @@ describe("POST /v1/run/:workflowId/save", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) }));
 
     const res = await app.fetch(
-      new Request("http://localhost/v1/run/wf-running/save", {
+      new Request("http://localhost/v1/workflows/wf-running/save", {
         method: "POST",
         headers: { ...authHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -208,7 +208,7 @@ describe("POST /v1/run/:workflowId/save", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({}) }));
 
     const res = await app.fetch(
-      new Request("http://localhost/v1/run/wf-other/save", {
+      new Request("http://localhost/v1/workflows/wf-other/save", {
         method: "POST",
         headers: { ...authHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -251,7 +251,7 @@ describe("POST /v1/run/:workflowId/save", () => {
     }));
 
     const res = await app.fetch(
-      new Request("http://localhost/v1/run/wf-complete/save", {
+      new Request("http://localhost/v1/workflows/wf-complete/save", {
         method: "POST",
         headers: { ...authHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -291,7 +291,7 @@ describe("POST /v1/run/:workflowId/save", () => {
     }));
 
     const res = await app.fetch(
-      new Request("http://localhost/v1/run/wf-default/save", {
+      new Request("http://localhost/v1/workflows/wf-default/save", {
         method: "POST",
         headers: { ...authHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -310,7 +310,7 @@ describe("POST /v1/run/:workflowId/save", () => {
 
   it("should require auth", async () => {
     const res = await app.fetch(
-      new Request("http://localhost/v1/run/wf-1/save", {
+      new Request("http://localhost/v1/workflows/wf-1/save", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

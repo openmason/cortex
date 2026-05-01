@@ -43,7 +43,7 @@ function makeMockEnv(opts: { toolCapable?: boolean; fullAuto?: boolean } = {}): 
     tenantId: "t-ms",
     userId: "u-ms",
     product: "bombastic",
-    scopes: ["run", "sessions", "skills", "models"],
+    scopes: ["workflows", "sessions", "skills", "models"],
     createdAt: new Date().toISOString(),
   }));
 
@@ -200,7 +200,7 @@ describe("Multi-step Workflow E2E", () => {
       }));
 
       const res = await app.fetch(
-        new Request("http://localhost/v1/run", {
+        new Request("http://localhost/v1/workflows", {
           method: "POST",
           headers: { ...authHeaders(), "Content-Type": "application/json" },
           body: JSON.stringify({ prompt: "scan my repo for vulnerabilities and outdated dependencies" }),
@@ -238,7 +238,7 @@ describe("Multi-step Workflow E2E", () => {
 
       // Use mode: "review_before_run" explicitly to override bombastic defaults
       const res = await app.fetch(
-        new Request("http://localhost/v1/run", {
+        new Request("http://localhost/v1/workflows", {
           method: "POST",
           headers: { ...authHeaders(), "Content-Type": "application/json" },
           body: JSON.stringify({ prompt: "scan my repo", mode: "review_before_run" }),
@@ -275,7 +275,7 @@ describe("Multi-step Workflow E2E", () => {
 
       // Step 1: Create paused workflow
       const createRes = await app.fetch(
-        new Request("http://localhost/v1/run", {
+        new Request("http://localhost/v1/workflows", {
           method: "POST",
           headers: { ...authHeaders(), "Content-Type": "application/json" },
           body: JSON.stringify({ prompt: "scan my repo", mode: "review_before_run" }),
@@ -290,7 +290,7 @@ describe("Multi-step Workflow E2E", () => {
 
       // Step 2: Resume with approval
       const resumeRes = await app.fetch(
-        new Request(`http://localhost/v1/run/${workflowId}/resume`, {
+        new Request(`http://localhost/v1/workflows/${workflowId}/resume`, {
           method: "POST",
           headers: { ...authHeaders(), "Content-Type": "application/json" },
           body: JSON.stringify({ workflowId, approved: true }),
@@ -308,7 +308,7 @@ describe("Multi-step Workflow E2E", () => {
       expect(resumeBody.plan.steps[1].status).toBe("completed");
     });
 
-    it("should retrieve multi-step workflow state via GET /v1/run/:id", async () => {
+    it("should retrieve multi-step workflow state via GET /v1/workflows/:id", async () => {
       const env = makeMockEnv({ toolCapable: false, fullAuto: false });
 
       vi.stubGlobal("fetch", vi.fn().mockImplementation(() => {
@@ -320,7 +320,7 @@ describe("Multi-step Workflow E2E", () => {
 
       // Create a paused workflow
       const createRes = await app.fetch(
-        new Request("http://localhost/v1/run", {
+        new Request("http://localhost/v1/workflows", {
           method: "POST",
           headers: { ...authHeaders(), "Content-Type": "application/json" },
           body: JSON.stringify({ prompt: "scan my repo", mode: "review_before_run" }),
@@ -334,7 +334,7 @@ describe("Multi-step Workflow E2E", () => {
 
       // Retrieve it
       const getRes = await app.fetch(
-        new Request(`http://localhost/v1/run/${workflowId}`, {
+        new Request(`http://localhost/v1/workflows/${workflowId}`, {
           headers: authHeaders(),
         }),
         env,
@@ -375,7 +375,7 @@ describe("Multi-step Workflow E2E", () => {
       // Instead, test the engine directly with this config.
       // For the E2E test, the default onError is "fail", so a failing step fails the workflow.
       const res = await app.fetch(
-        new Request("http://localhost/v1/run", {
+        new Request("http://localhost/v1/workflows", {
           method: "POST",
           headers: { ...authHeaders(), "Content-Type": "application/json" },
           body: JSON.stringify({ prompt: "scan my repo" }),
@@ -447,7 +447,7 @@ describe("Multi-step Workflow E2E", () => {
       }));
 
       const res = await app.fetch(
-        new Request("http://localhost/v1/run", {
+        new Request("http://localhost/v1/workflows", {
           method: "POST",
           headers: { ...authHeaders(), "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -522,7 +522,7 @@ describe("Multi-step Workflow E2E", () => {
 
       // Explicitly set mode to review_before_run (bombastic defaults to full_auto)
       const res = await app.fetch(
-        new Request("http://localhost/v1/run", {
+        new Request("http://localhost/v1/workflows", {
           method: "POST",
           headers: { ...authHeaders(), "Content-Type": "application/json" },
           body: JSON.stringify({ prompt: "scan repo", mode: "review_before_run" }),
@@ -587,7 +587,7 @@ describe("Multi-step Workflow E2E", () => {
       }));
 
       const res = await app.fetch(
-        new Request("http://localhost/v1/run", {
+        new Request("http://localhost/v1/workflows", {
           method: "POST",
           headers: { ...authHeaders(), "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -631,7 +631,7 @@ describe("Multi-step Workflow E2E", () => {
       }));
 
       const res = await app.fetch(
-        new Request("http://localhost/v1/run", {
+        new Request("http://localhost/v1/workflows", {
           method: "POST",
           headers: { ...authHeaders(), "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -668,7 +668,7 @@ describe("Multi-step Workflow E2E", () => {
       }));
 
       const res = await app.fetch(
-        new Request("http://localhost/v1/run", {
+        new Request("http://localhost/v1/workflows", {
           method: "POST",
           headers: {
             ...authHeaders(),
@@ -703,7 +703,7 @@ describe("Multi-step Workflow E2E", () => {
 
       // Create paused workflow (must use review_before_run to pause; bombastic defaults to full_auto)
       const createRes = await app.fetch(
-        new Request("http://localhost/v1/run", {
+        new Request("http://localhost/v1/workflows", {
           method: "POST",
           headers: { ...authHeaders(), "Content-Type": "application/json" },
           body: JSON.stringify({ prompt: "scan my repo", mode: "review_before_run" }),
@@ -718,7 +718,7 @@ describe("Multi-step Workflow E2E", () => {
 
       // Reject
       const rejectRes = await app.fetch(
-        new Request(`http://localhost/v1/run/${workflowId}/resume`, {
+        new Request(`http://localhost/v1/workflows/${workflowId}/resume`, {
           method: "POST",
           headers: { ...authHeaders(), "Content-Type": "application/json" },
           body: JSON.stringify({ workflowId, approved: false }),
@@ -755,7 +755,7 @@ describe("Multi-step Workflow E2E", () => {
       }));
 
       const res = await app.fetch(
-        new Request("http://localhost/v1/run", {
+        new Request("http://localhost/v1/workflows", {
           method: "POST",
           headers: { ...authHeaders(), "Content-Type": "application/json" },
           body: JSON.stringify({ prompt: "do something impossible" }),
@@ -786,7 +786,7 @@ describe("Multi-step Workflow E2E", () => {
       }));
 
       const res = await app.fetch(
-        new Request("http://localhost/v1/run", {
+        new Request("http://localhost/v1/workflows", {
           method: "POST",
           headers: { ...authHeaders(), "Content-Type": "application/json" },
           body: JSON.stringify({ prompt: "scan for CVEs" }),

@@ -64,6 +64,7 @@ export const authMiddleware = createMiddleware<{
   c.set("userId", data.userId);
   c.set("product", data.product);
   c.set("scopes", data.scopes);
+  c.set("apiKeyPrefix", key.slice(0, 12)); // For rate limiting and tracking
 
   await next();
 });
@@ -86,24 +87,24 @@ export function requireScope(scope: string) {
 }
 
 const RATE_LIMIT_WINDOW = 60;     // 1 minute window
-const RATE_LIMIT_MAX = 30;        // 30 requests per window
+const RATE_LIMIT_MAX = 30;        // 30 requests per window per API key
 
 /**
- * Simple KV-based rate limiter per tenant.
+ * Simple KV-based rate limiter per API key.
  * Uses a sliding window counter stored in SESSION_CACHE.
  */
 export const rateLimitMiddleware = createMiddleware<{
   Bindings: Env;
   Variables: AppVariables;
 }>(async (c, next) => {
-  const tenantId = c.get("tenantId");
-  if (!tenantId) {
+  const apiKeyPrefix = c.get("apiKeyPrefix");
+  if (!apiKeyPrefix) {
     await next();
     return;
   }
 
   try {
-    const windowKey = `ratelimit:${tenantId}:${Math.floor(Date.now() / 1000 / RATE_LIMIT_WINDOW)}`;
+    const windowKey = `ratelimit:key:${apiKeyPrefix}:${Math.floor(Date.now() / 1000 / RATE_LIMIT_WINDOW)}`;
 
     const current = parseInt(await c.env.SESSION_CACHE.get(windowKey) ?? "0", 10);
     if (current >= RATE_LIMIT_MAX) {
@@ -145,15 +146,13 @@ export const usageTrackingMiddleware = createMiddleware<{
 
   // Fire-and-forget usage metric after the response is sent
   const metrics = new Metrics(c.env.ANALYTICS);
-  const key = c.req.header("Authorization")?.slice(7) ?? "";
-  // Store first 8 chars of key as identifier (enough to distinguish, not enough to auth)
-  const keyPrefix = key.slice(0, 8);
+  const keyPrefix = c.get("apiKeyPrefix") ?? "";
 
   metrics.write("api_usage", {
     requestId: c.get("requestId"),
     tenantId: c.get("tenantId"),
     product: c.get("product"),
-    skillSlug: keyPrefix,  // blob4: repurposed as key prefix for api_usage events
+    skillSlug: keyPrefix.slice(0, 8),  // blob4: repurposed as key prefix for api_usage events
     status: String(c.res.status),
     error: c.res.status >= 400 ? new URL(c.req.url).pathname : "",  // blob6: endpoint on error
     durationMs: Date.now() - start,

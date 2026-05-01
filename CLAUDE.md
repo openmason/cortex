@@ -6,6 +6,8 @@ Cloudflare Workers-based agent runtime that orchestrates skill discovery, planni
 ## Architecture
 - **Supervisor Agent** (`src/agents/supervisor.ts`) — LLM-powered agentic loop with tool calling (findSkill, checkPolicy, buildPlan, invokeSkill)
 - **Workflow Engine** (`src/workflow/engine.ts`) — orchestrates multi-step skill execution with pause/resume, input mapping ($prev, $step.N). Accepts optional `LLMClient` for codegen fallback in workflow steps.
+- **DAG Workflow Engine** (`src/workflow/dag-engine.ts`) — executes DAG-based workflows with parallel layer execution, condition evaluation, approval gates, and retry policies
+- **DAG Utilities** (`src/workflow/dag.ts`) — Kahn's algorithm for `toExecutionLayers()`, condition evaluation, DAG validation, plan↔DAG conversion
 - **Execution Router** (`src/execution/router.ts`) — dispatches to 5 layers: mcp-remote, instructions, worker, container, composite. Includes codegen fallback for skills with no executable bundle.
 - **Daytona Client** (`src/clients/daytona.ts`) — Uses `@daytonaio/sdk` for sandbox execution. Key methods: `execute()` (shell commands), `runCode()` (direct code execution via `codeRun()`), `cleanup()` (orphaned sandbox removal).
 - **Policy Engine** (`src/policy/engine.ts`) — tenant-level trust checks, appetite thresholds, sensitive categories
@@ -74,22 +76,30 @@ Runics (registry) ──→ Cognium (internal trust/scanning)
 - Create keys: `POST /admin/api-keys` with `{tenantId, userId, product, scopes?}`
 - Revoke keys: `DELETE /admin/api-keys/:key`
 - **Scope enforcement** via `requireScope()` middleware:
-  - `run` — `/v1/run`, `/v1/run/stream`, `/v1/run/:id`, `/v1/run/:id/resume`, `/v1/run/:id/save`
+  - `workflows` — `/v1/workflows/*`, `/v1/chat`, `/v1/approvals/*` (primary scope for workflow operations)
+  - `run` — deprecated alias for `workflows` (backward compatibility only)
   - `sessions` — `/v1/sessions/*`
   - `skills` — `/v1/skills/*`
   - `models` — no scope required (open to any authenticated key)
-- Valid scopes: `["run", "sessions", "skills", "models"]`
-- Default scopes on new keys: `["run", "sessions"]`
+- Valid scopes: `["workflows", "run", "sessions", "skills", "models"]`
+- Default scopes on new keys: `["workflows", "sessions"]`
 - **Visibility enforcement**: `userId` is passed to Runics in `findSkill` and `listComposites` for private skill filtering
 
 ## API Endpoints
 - `GET /` — Service info
 - `GET /health` — Health check (KV + DB/Hyperdrive + Runics)
-- `POST /v1/run` — Start workflow (JSON response; add `"stream": true` or `Accept: text/event-stream` for SSE)
-- `POST /v1/run/stream` — Start workflow (SSE streaming, dedicated endpoint)
-- `GET /v1/run/:id` — Workflow status
-- `POST /v1/run/:id/resume` — Resume paused workflow
-- `POST /v1/run/:id/save` — Save workflow as skill
+- `POST /v1/workflows` — Start workflow (primary; JSON response; add `"stream": true` or `Accept: text/event-stream` for SSE)
+- `POST /v1/workflows/stream` — Start workflow with SSE streaming (primary)
+- `GET /v1/workflows/:id` — Workflow status (primary)
+- `POST /v1/workflows/:id/resume` — Resume paused workflow (primary)
+- `POST /v1/workflows/:id/terminate` — Terminate running/paused workflow (primary)
+- `POST /v1/workflows/:id/save` — Save workflow as skill (primary)
+- `POST /v1/run` — **DEPRECATED** alias for `/v1/workflows` (backward compatibility)
+- `POST /v1/run/stream` — **DEPRECATED** alias for `/v1/workflows/stream`
+- `GET /v1/run/:id` — **DEPRECATED** alias for `/v1/workflows/:id`
+- `POST /v1/run/:id/resume` — **DEPRECATED** alias for `/v1/workflows/:id/resume`
+- `POST /v1/run/:id/terminate` — **DEPRECATED** alias for `/v1/workflows/:id/terminate`
+- `POST /v1/run/:id/save` — **DEPRECATED** alias for `/v1/workflows/:id/save`
 - `GET /v1/models` — List available LLM models
 - `GET /v1/sessions` — List sessions (tenant-scoped, paginated)
 - `GET /v1/sessions/:id` — Session detail with step executions
@@ -130,10 +140,11 @@ When a skill has no executable bundle (no `mcpUrl`, no `skillMd`, no `r2BundleKe
 - Sandbox lifecycle: create → execute → delete (always cleaned up in `finally` block)
 
 ## Rate Limiting
-- KV-based sliding window: 30 requests/minute per tenant
-- Applied to `/v1/run`, `/v1/run/*`, and `/v1/chat` routes
+- KV-based sliding window: 30 requests/minute per API key
+- Applied to `/v1/workflows`, `/v1/workflows/*`, `/v1/run`, `/v1/run/*`, and `/v1/chat` routes
 - All KV writes are non-blocking (`waitUntil` + `try/catch`) to avoid blocking on KV daily write limits
 - Response headers: `X-RateLimit-Limit`, `X-RateLimit-Remaining`
+- Rate limit key format: `ratelimit:key:{apiKeyPrefix}:{window}` (first 12 chars of API key)
 
 ## Runics Skill Caching
 - `findSkill` results cached in KV for 5 minutes (key: `runics:search:{query}:{appetite}`)
@@ -141,10 +152,154 @@ When a skill has no executable bundle (no `mcpUrl`, no `skillMd`, no `r2BundleKe
 - All cache writes are best-effort (wrapped in try/catch)
 
 ## SSE Streaming
-- `POST /v1/run/stream` returns Server-Sent Events (dedicated streaming endpoint)
-- `POST /v1/run` with `"stream": true` in body or `Accept: text/event-stream` header also returns SSE (unified endpoint)
+- `POST /v1/workflows/stream` returns Server-Sent Events (dedicated streaming endpoint)
+- `POST /v1/workflows` with `"stream": true` in body or `Accept: text/event-stream` header also returns SSE (unified endpoint)
 - Event types: `planning`, `tool_call`, `tool_result`, `step_start`, `step_complete`, `workflow_complete`, `error`, `done`, `conversation`
 - `done` event includes `usage: { totalTokens, totalCost }` for cost tracking
+
+## DAG Workflows (Spec v2.0)
+`POST /v1/workflows` accepts two formats: **DAG-based** (parallel execution) or **prompt-based** (LLM-planned).
+
+### DAG Request Format
+```json
+{
+  "dag": {
+    "id": "optional-workflow-id",
+    "name": "Security Audit Pipeline",
+    "description": "Runs secrets scan, dependency audit, and Cognium scan in parallel",
+    "mode": "full_auto",
+    "steps": [
+      {
+        "id": "secrets",
+        "binding": "static",
+        "skillRef": "secrets-scan@1.0.0",
+        "inputMapping": { "repoUrl": "$context.repoUrl" },
+        "onError": "skip"
+      },
+      {
+        "id": "deps",
+        "binding": "static",
+        "skillRef": "dependency-audit@latest",
+        "inputMapping": { "repoUrl": "$context.repoUrl" },
+        "onError": "skip"
+      },
+      {
+        "id": "cognium",
+        "binding": "dynamic",
+        "skillRef": "run security scan on the codebase",
+        "dependsOn": ["secrets", "deps"],
+        "condition": { "type": "expression", "expr": "$step.secrets.status === 'completed'" },
+        "onError": "fail",
+        "retry": { "count": 2, "delayMs": 1000, "backoff": "exponential" }
+      },
+      {
+        "id": "review",
+        "dependsOn": ["cognium"],
+        "binding": "static",
+        "skillRef": "create-pr@1.0.0",
+        "requiresApproval": true,
+        "onError": "fail"
+      }
+    ]
+  },
+  "productId": "controlcenter",
+  "callbackUrl": "https://my-app.com/webhook/workflow-done"
+}
+```
+
+### DAG Step Fields
+- `id` — unique step identifier (required)
+- `binding` — `"static"` (slug@version) or `"dynamic"` (natural language query)
+- `skillRef` — skill reference: `"slug@version"` for static, natural language for dynamic
+- `dependsOn` — array of step IDs that must complete before this step runs
+- `inputMapping` — template expressions: `$prev`, `$step.N.field`, `$context.field` (supports nested objects/arrays)
+- `condition` — `{ type: "expression", expr: "..." }` — step runs only if evaluates to true
+- `onError` — `"fail"` (abort workflow), `"skip"` (continue), `"retry"` (use retry config)
+- `retry` — `{ count, delayMs, backoff: "linear"|"exponential" }` — required if onError="retry"
+- `requiresApproval` — if true, workflow pauses for human approval before executing this step
+
+### Workflow-Level Context (`$context`)
+DAG requests accept a `context` object for workflow-level secrets and shared variables:
+```json
+{
+  "dag": { "steps": [...] },
+  "context": {
+    "githubToken": "ghp_xxx",
+    "awsCredentials": { "accessKey": "AKIA...", "secret": "..." }
+  }
+}
+```
+
+Steps reference context values in `inputMapping`:
+```json
+"inputMapping": {
+  "token": "$context.githubToken",
+  "headers": { "Authorization": "$context.awsCredentials.accessKey" }
+}
+```
+
+- `$context` — entire context object
+- `$context.key` — top-level key
+- `$context.nested.path.value` — nested path (dot notation)
+- Works recursively in nested objects and arrays within inputMapping
+
+### Callback URL
+DAG requests accept `callbackUrl` to receive a webhook when the workflow completes:
+```json
+{
+  "dag": { "steps": [...] },
+  "callbackUrl": "https://my-app.com/webhook/workflow-done"
+}
+```
+
+On workflow completion or failure, Cortex POSTs:
+```json
+{
+  "workflowId": "uuid",
+  "status": "completed|failed",
+  "outputs": { /* step outputs */ },
+  "error": "optional error message",
+  "startedAt": "2026-05-01T...",
+  "completedAt": "2026-05-01T..."
+}
+```
+
+- Fire-and-forget via `waitUntil` (doesn't block response)
+- Fires on terminal states: `completed`, `failed`, `terminated`
+- Does not fire on pause states
+
+### DAG Response Format
+```json
+{
+  "workflowId": "uuid",
+  "status": "completed|running|paused_for_review|paused_at_step|failed",
+  "dag": { /* original DAG with resolved skills */ },
+  "outputs": {
+    "secrets": { "status": "completed", "result": { /* skill output */ } },
+    "deps": { "status": "completed", "result": { /* skill output */ } },
+    "cognium": { "status": "completed", "result": { /* skill output */ } },
+    "review": { "status": "paused", "reason": "approval_required" }
+  },
+  "createdAt": "2026-04-27T..."
+}
+```
+
+### Execution Modes
+- `full_auto` — execute all steps immediately, no pauses
+- `review_before_run` — pause for approval before executing any step
+- `step_by_step` — pause after each layer for incremental approval
+
+### Parallel Execution
+Steps with no `dependsOn` or whose dependencies have all completed run in parallel. The DAG engine uses Kahn's algorithm to build execution layers:
+- Layer 0: steps with no dependencies (run in parallel)
+- Layer 1: steps whose only dependencies are in layer 0 (run in parallel)
+- etc.
+
+### Approval Flow
+When a step has `requiresApproval: true`, the workflow pauses with status `paused_for_review` and `pausedStepId` set. Resume via:
+- `POST /v1/workflows/:id/resume` with `{ "approved": true }` to continue
+- `POST /v1/approvals/:id/approve` (convenience alias)
+- `POST /v1/approvals/:id/reject` to abort
 
 ## Tenant Policies
 - Policy loading chain: KV cache (5 min TTL) → DB (`tenant_policies` table) → `defaultPolicy()` fallback
@@ -152,12 +307,12 @@ When a skill has no executable bundle (no `mcpUrl`, no `skillMd`, no `r2BundleKe
 - Admin endpoints: `PUT /admin/policies`, `GET /admin/policies/:tenantId/:product`
 
 ## Workflow State Fallback
-- `GET /v1/run/:id` uses `engine.loadState()`: KV cache → DB fallback (reconstructs `WorkflowState` from `workflow_sessions` row)
+- `GET /v1/workflows/:id` uses `engine.loadState()`: KV cache → DB fallback (reconstructs `WorkflowState` from `workflow_sessions` row)
 - `saveAsSkill` also uses `engine.loadState()` for the same fallback
 
 ## Workflow Timeout Enforcement
 - Paused workflows (`paused_for_review`, `paused_at_step`) get `timeoutAt` set to `now + WORKFLOW_TIMEOUT_MS` (default 5 min)
-- **Lazy check**: `GET /v1/run/:id` checks `timeoutAt` and transitions to `timed_out` if expired
+- **Lazy check**: `GET /v1/workflows/:id` checks `timeoutAt` and transitions to `timed_out` if expired
 - **Resume guard**: `engine.resume()` checks timeout before allowing execution
 - **Cron sweep**: `*/5 * * * *` cron does two things:
   1. Lists `workflow:*` KV keys, expires any paused workflows past `timeoutAt`
@@ -165,7 +320,7 @@ When a skill has no executable bundle (no `mcpUrl`, no `skillMd`, no `r2BundleKe
 - Backward compat: old states without `timeoutAt` are never lazily timed out
 
 ## Testing
-- 454 unit tests passing across 29 test files (`npx vitest run`)
+- 553 unit tests passing across 31 test files (`npx vitest run`)
 - Local dev tested with `npx wrangler dev` — health, models, and full run request all work
 - E2E verified live: codegen pipeline working end-to-end (findSkill → invokeSkill → codegen → Daytona → result)
 - E2E smoke test: `ADMIN_SECRET=<secret> npx tsx scripts/smoke-test.ts` (9 tests against live deployment)
@@ -182,11 +337,13 @@ When a skill has no executable bundle (no `mcpUrl`, no `skillMd`, no `r2BundleKe
 - `src/clients/runics.ts` — Runics client with KV caching (findSkill, getSkill, composites)
 - `src/execution/router.ts` — Execution router with codegen fallback and retry
 - `src/workflow/engine.ts` — workflow orchestration with DB persistence, SSE events, and LLM passthrough
+- `src/workflow/dag-engine.ts` — DAG workflow executor with parallel layers, conditions, retries
+- `src/workflow/dag.ts` — DAG utilities (toExecutionLayers, evaluateCondition, validateDAG)
 - `src/workflow/input-mapping.ts` — $prev/$step.N resolver
 - `src/conversation/manager.ts` — multi-turn conversation state management (KV-backed)
 - `src/db/schema.ts` — Drizzle schema (workflow_sessions, step_executions, execution_traces, tenant_policies, api_keys)
 - `src/db/repository.ts` — DB operations (sessions, policies, traces, API keys)
-- `src/routes/run.ts` — /v1/run, /v1/run/stream, /v1/run/:id, resume, save, models
+- `src/routes/run.ts` — /v1/workflows/* (primary) + /v1/run/* (deprecated aliases), /v1/models
 - `src/routes/sessions.ts` — /v1/sessions, /v1/sessions/:id, /v1/sessions/:id/trace, conversations CRUD
 - `src/routes/skills.ts` — /v1/skills/composites CRUD (list, detail, update, deprecate, fork)
 - `src/routes/chat.ts` — /v1/chat (Clove-compatible, AI SDK Data Stream Protocol)
@@ -195,7 +352,8 @@ When a skill has no executable bundle (no `mcpUrl`, no `skillMd`, no `r2BundleKe
 - `src/routes/admin.ts` — /admin/api-keys, /admin/policies
 - `src/routes/health.ts` — /health
 - `scripts/smoke-test.ts` — E2E smoke test against live deployment
-- `wrangler.toml` — all bindings with real IDs, cron trigger
+- `wrangler.toml` — staging config (phantoms account), all bindings with real IDs, cron trigger
+- `wrangler.production.toml` — production config template (cognium account), needs provisioning
 - `.dev.vars` — local secrets (LLMPROXY_API_KEY, DAYTONA_API_KEY, DATABASE_URL, ADMIN_SECRET)
 
 ## Spec
@@ -227,7 +385,7 @@ Cognium and Forge queue integrations have been removed. What remains:
 - **Instrumentation points**: request (run handler), skill_exec (router), codegen (router), llm_call (LLMClient), api_usage (auth middleware), workflow (engine), cron (index.ts)
 - **Per-API-key tracking**: `usageTrackingMiddleware` fires `api_usage` event after every `/v1/*` request with key prefix (first 8 chars), HTTP status, endpoint (on error), latency
 - **Per-turn usage tracking**: `ConversationState.turnMetrics` records tokens, cost, and tool calls for each LLM turn. `GET /v1/sessions/conversations/:id` returns `turnMetrics` array + aggregate `usage: { totalTokens, totalCost }`
-- **RunResponse usage**: `POST /v1/run` returns `usage: { totalTokens, totalCost }` from the agent loop
+- **RunResponse usage**: `POST /v1/workflows` returns `usage: { totalTokens, totalCost }` from the agent loop
 
 ## Architecture Decisions — Spec vs Reality
 
@@ -251,9 +409,10 @@ Key differences between the spec docs (`cortex-specification.md`, `runics-unifie
 - Custom data parts (via `{type:"data", data:[...]}`) carry `conversation`, `workflow-complete`, `approval-required`.
 
 ### API Shape Drift
+- `POST /v1/workflows` — primary workflow endpoint (spec v2 aligned), accepts `product + prompt + appetite + mode`
+- `POST /v1/run` — **DEPRECATED** alias for `/v1/workflows` (backward compatibility only)
 - `POST /v1/chat` — Clove-compatible endpoint added (accepts `productId + messages` with parts array, streams AI SDK v5+ SSE)
 - `POST /v1/approvals/:id/approve` and `/reject` — alias routes added, delegate to `engine.resume()`
-- `POST /v1/run` — original endpoint, accepts `product + prompt + appetite + mode`
 - Spec says per-product `approvalTimeoutMs` — reality uses global `WORKFLOW_TIMEOUT_MS`
 
 ### Activepieces — Not Started
@@ -261,8 +420,7 @@ Key differences between the spec docs (`cortex-specification.md`, `runics-unifie
 - Not integrated. Would be a separate self-hosted service ($10/mo VPS).
 
 ## Next Steps (Prioritized)
-1. Webhook/callback support for long-running workflows
-2. Token-level streaming (stream LLM tokens to client as they arrive, not just tool events)
-3. Production CORS lockdown (currently allows all origins)
-4. Rate limit per API key (currently per tenant)
-5. Activepieces integration (triggers & events — webhooks, cron, email, Stripe, GitHub PRs)
+1. Token-level streaming (stream LLM tokens to client as they arrive, not just tool events)
+2. Provision production environment (see `wrangler.production.toml`)
+3. Activepieces integration (triggers & events — webhooks, cron, email, Stripe, GitHub PRs)
+4. CF Workflows POC (durable execution with automatic retries/checkpointing)

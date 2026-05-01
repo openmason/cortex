@@ -1,15 +1,15 @@
 # =============================================================================
 # PRODUCTION - cortex.cognium.net
-# Deploy: npx wrangler deploy -c wrangler.production.toml
-# Account: cognium (REPLACE_WITH_COGNIUM_ACCOUNT_ID)
+# Deploy: npx wrangler deploy --config wrangler.production.toml
+# Account: cognium (TODO: add account ID)
 # =============================================================================
 
 name = "cortex"
 main = "src/index.ts"
 compatibility_date = "2025-02-01"
 compatibility_flags = ["nodejs_compat"]
-account_id = "bb8e02ea0ca7c225d2fb62d24a9940be"
 
+# Custom domain
 routes = [
   { pattern = "cortex.cognium.net", custom_domain = true }
 ]
@@ -27,27 +27,30 @@ tag = "v1"
 new_sqlite_classes = ["WorkflowDurableObject"]
 
 # --- KV Namespaces ---
+# Create with: npx wrangler kv:namespace create SESSION_CACHE --config wrangler.production.toml
 [[kv_namespaces]]
 binding = "SESSION_CACHE"
-id = "d827ec6be74641ee8fa53a0af4cd7e1b"
+id = "TODO_SESSION_CACHE_ID"
 
+# Create with: npx wrangler kv:namespace create WORKFLOW_STATE --config wrangler.production.toml
 [[kv_namespaces]]
 binding = "WORKFLOW_STATE"
-id = "d4180b7f747f47baa0c36f24b75dd0ef"
+id = "TODO_WORKFLOW_STATE_ID"
 
-# --- Hyperdrive (Neon Postgres) ---
+# --- Hyperdrive (Production Postgres) ---
+# Create with: npx wrangler hyperdrive create cortex-prod --connection-string="postgres://..."
 [[hyperdrive]]
 binding = "HYPERDRIVE"
-id = "c9aee067341446239e483dbf6df25f96"
-localConnectionString = "${DATABASE_URL}"
+id = "TODO_HYPERDRIVE_ID"
 
 # --- R2 ---
+# Create with: npx wrangler r2 bucket create cortex-artifacts-prod
 [[r2_buckets]]
 binding = "R2_BUCKET"
-bucket_name = "cortex-artifacts"
+bucket_name = "cortex-artifacts-prod"
 
 # --- Service Bindings ---
-# Note: Service binding must be in same account, so Runics must also be deployed to cognium account
+# Note: Runics must also be deployed to the cognium account
 [[services]]
 binding = "RUNICS_SERVICE"
 service = "runics"
@@ -64,7 +67,9 @@ dataset = "cortex_metrics"
 # --- Environment Variables ---
 [vars]
 ENVIRONMENT = "production"
-RUNICS_URL = "https://api.runics.net"
+# CORS: comma-separated allowed origins (locked down in production)
+CORS_ALLOWED_ORIGINS = "https://controldeck.cognium.net,https://app.cognium.net,https://cognium.net"
+RUNICS_URL = "https://runics.cognium.net"
 DAYTONA_TARGET = "us"
 DAYTONA_API_URL = "https://app.daytona.io/api"
 LLMPROXY_URL = "https://llmproxy.xus.one"
@@ -73,8 +78,42 @@ DEFAULT_EXECUTION_MODE = "review_before_run"
 DEFAULT_APPETITE = "balanced"
 WORKFLOW_TIMEOUT_MS = "300000"
 MAX_SKILL_CHAIN_DEPTH = "10"
-CF_ACCOUNT_ID = "bb8e02ea0ca7c225d2fb62d24a9940be"
+CF_ACCOUNT_ID = "TODO_COGNIUM_ACCOUNT_ID"
 
 # --- Cron Triggers ---
 [triggers]
 crons = ["*/5 * * * *"]
+
+# =============================================================================
+# SETUP CHECKLIST
+# =============================================================================
+# 1. Switch to cognium account:
+#    npx wrangler whoami
+#    npx wrangler login (if needed)
+#
+# 2. Create KV namespaces:
+#    npx wrangler kv:namespace create SESSION_CACHE --config wrangler.production.toml
+#    npx wrangler kv:namespace create WORKFLOW_STATE --config wrangler.production.toml
+#    -> Update IDs above
+#
+# 3. Create Hyperdrive:
+#    npx wrangler hyperdrive create cortex-prod --connection-string="postgresql://user:pass@host/db"
+#    -> Update ID above
+#
+# 4. Create R2 bucket:
+#    npx wrangler r2 bucket create cortex-artifacts-prod
+#
+# 5. Set secrets:
+#    npx wrangler secret put ADMIN_SECRET --config wrangler.production.toml
+#    npx wrangler secret put LLMPROXY_API_KEY --config wrangler.production.toml
+#    npx wrangler secret put DAYTONA_API_KEY --config wrangler.production.toml
+#    npx wrangler secret put CF_API_TOKEN --config wrangler.production.toml
+#
+# 6. Deploy Runics to cognium account first (service binding dependency)
+#
+# 7. Deploy Cortex:
+#    npx wrangler deploy --config wrangler.production.toml
+#
+# 8. Configure custom domain in CF dashboard:
+#    cortex.cognium.net -> cortex worker
+# =============================================================================

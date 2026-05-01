@@ -9,8 +9,8 @@ import { Metrics } from "../observability/metrics";
 
 const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
-// Scope enforcement
-app.use("/chat", requireScope("run"));
+// Scope enforcement — chat uses workflow scope (can trigger workflows)
+app.use("/chat", requireScope("workflows"));
 
 // ---------------------------------------------------------------------------
 // POST /v1/chat — Clove-compatible chat endpoint (AI SDK Data Stream)

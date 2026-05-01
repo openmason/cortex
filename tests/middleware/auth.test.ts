@@ -41,7 +41,7 @@ function makeMockEnv(seedKey = true): Env {
         tenantId: "t1",
         userId: "u1",
         product: "bombastic",
-        scopes: ["run", "sessions"],
+        scopes: ["workflows", "sessions"],
         createdAt: new Date().toISOString(),
       }),
     );
@@ -163,7 +163,7 @@ describe("Auth Middleware", () => {
     expect(body.tenantId).toBe("t1");
     expect(body.userId).toBe("u1");
     expect(body.product).toBe("bombastic");
-    expect(body.scopes).toEqual(["run", "sessions"]);
+    expect(body.scopes).toEqual(["workflows", "sessions"]);
   });
 
   it("should call KV.get with correct key format", async () => {
@@ -188,7 +188,7 @@ describe("Auth Middleware", () => {
       tenantId: "db-tenant",
       userId: "db-user",
       product: "costaff",
-      scopes: ["run"],
+      scopes: ["workflows"],
       createdAt: new Date().toISOString(),
     });
 
@@ -212,7 +212,7 @@ describe("Auth Middleware", () => {
       tenantId: "db-tenant",
       userId: "db-user",
       product: "costaff",
-      scopes: ["run"],
+      scopes: ["workflows"],
       createdAt: new Date().toISOString(),
     });
 
@@ -278,12 +278,12 @@ describe("requireScope", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    env = makeMockEnv(); // key has scopes: ["run", "sessions"]
+    env = makeMockEnv(); // key has scopes: ["workflows", "sessions"]
     mockGetApiKey.mockResolvedValue(null);
   });
 
   it("should pass when key has the required scope", async () => {
-    const app = makeScopedApp("run");
+    const app = makeScopedApp("workflows");
     const res = await app.fetch(
       new Request("http://localhost/protected", {
         headers: { Authorization: `Bearer ${TEST_KEY}` },

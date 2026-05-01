@@ -63,7 +63,7 @@ function makeMockEnv(): Env {
       tenantId: "t1",
       userId: "u1",
       product: "bombastic",
-      scopes: ["run", "sessions"],
+      scopes: ["workflows", "sessions"],
       createdAt: new Date().toISOString(),
     }),
   );
@@ -137,7 +137,7 @@ function parseStreamParts(text: string): Array<Record<string, unknown>> {
   return parts;
 }
 
-describe("POST /v1/run/stream", () => {
+describe("POST /v1/workflows/stream", () => {
   let env: Env;
   const ctx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
 
@@ -148,7 +148,7 @@ describe("POST /v1/run/stream", () => {
 
   it("should reject invalid requests", async () => {
     const res = await app.fetch(
-      new Request("http://localhost/v1/run/stream", {
+      new Request("http://localhost/v1/workflows/stream", {
         method: "POST",
         headers: { ...authHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify({}),
@@ -162,7 +162,7 @@ describe("POST /v1/run/stream", () => {
 
   it("should require auth", async () => {
     const res = await app.fetch(
-      new Request("http://localhost/v1/run/stream", {
+      new Request("http://localhost/v1/workflows/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt: "test" }),
@@ -178,7 +178,7 @@ describe("POST /v1/run/stream", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockChatResponse("Hi!")));
 
     const res = await app.fetch(
-      new Request("http://localhost/v1/run/stream", {
+      new Request("http://localhost/v1/workflows/stream", {
         method: "POST",
         headers: { ...authHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify({ prompt: "hello", product: "bombastic" }),
@@ -210,7 +210,7 @@ describe("POST /v1/run/stream", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockChatResponse("I'll help you with that.")));
 
     const res = await app.fetch(
-      new Request("http://localhost/v1/run/stream", {
+      new Request("http://localhost/v1/workflows/stream", {
         method: "POST",
         headers: { ...authHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -283,7 +283,7 @@ describe("POST /v1/run/stream", () => {
     }));
 
     const res = await app.fetch(
-      new Request("http://localhost/v1/run/stream", {
+      new Request("http://localhost/v1/workflows/stream", {
         method: "POST",
         headers: { ...authHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -314,7 +314,7 @@ describe("POST /v1/run/stream", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockChatResponse("I can help you.")));
 
     const res = await app.fetch(
-      new Request("http://localhost/v1/run/stream", {
+      new Request("http://localhost/v1/workflows/stream", {
         method: "POST",
         headers: { ...authHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify({ prompt: "help me", product: "bombastic" }),

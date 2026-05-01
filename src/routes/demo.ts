@@ -855,7 +855,7 @@ class App {
 
   async approve(wf){
     try{
-      const{d}=await this.api.post('/v1/run/'+wf+'/resume',{approved:true});
+      const{d}=await this.api.post('/v1/workflows/'+wf+'/resume',{approved:true});
       this.chat.handlePart({type:'text-start'});
       this.chat.handlePart({type:'text-delta',delta:'Approved. '+(d?.summary||'')});
       this.chat.handlePart({type:'text-end'});
@@ -864,7 +864,7 @@ class App {
 
   async reject(wf){
     try{
-      const{d}=await this.api.post('/v1/run/'+wf+'/resume',{approved:false});
+      const{d}=await this.api.post('/v1/workflows/'+wf+'/resume',{approved:false});
       this.chat.handlePart({type:'text-start'});
       this.chat.handlePart({type:'text-delta',delta:'Rejected.'});
       this.chat.handlePart({type:'text-end'});

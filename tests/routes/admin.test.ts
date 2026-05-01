@@ -142,7 +142,7 @@ describe("Admin Routes", () => {
       expect(body.tenantId).toBe("t1");
       expect(body.userId).toBe("u1");
       expect(body.product).toBe("bombastic");
-      expect(body.scopes).toEqual(["run", "sessions"]);
+      expect(body.scopes).toEqual(["workflows", "sessions"]);
       expect(body.createdAt).toBeDefined();
 
       // Verify it was persisted to DB
@@ -153,7 +153,7 @@ describe("Admin Routes", () => {
           tenantId: "t1",
           userId: "u1",
           product: "bombastic",
-          scopes: ["run", "sessions"],
+          scopes: ["workflows", "sessions"],
         }),
       );
 
@@ -172,7 +172,7 @@ describe("Admin Routes", () => {
             tenantId: "t2",
             userId: "u2",
             product: "controlcenter",
-            scopes: ["run"],
+            scopes: ["workflows"],
           }),
         }),
         env,
@@ -181,7 +181,7 @@ describe("Admin Routes", () => {
 
       expect(res.status).toBe(201);
       const body = (await res.json()) as any;
-      expect(body.scopes).toEqual(["run"]);
+      expect(body.scopes).toEqual(["workflows"]);
       expect(body.product).toBe("controlcenter");
 
       // Verify DB persistence with custom scopes
@@ -191,7 +191,7 @@ describe("Admin Routes", () => {
           tenantId: "t2",
           userId: "u2",
           product: "controlcenter",
-          scopes: ["run"],
+          scopes: ["workflows"],
         }),
       );
     });
