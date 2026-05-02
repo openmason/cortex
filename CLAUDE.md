@@ -435,8 +435,57 @@ Key differences between the spec docs (`cortex-specification.md`, `runics-unifie
 - Spec lists Activepieces as the event/trigger layer (webhooks, cron, email, Stripe, GitHub PRs).
 - Not integrated. Would be a separate self-hosted service ($10/mo VPS).
 
+## Current State (2026-05-02)
+
+### Deployed to Staging
+- **URL**: `https://cortex.phantoms.workers.dev`
+- **Account**: phantoms (1f59f4dcd0ebb559e3c392566978d446)
+- **Tests**: 558 passing across 32 test files
+- **Smoke tests**: 8 passed, 1 warn (Runics unavailable)
+
+### Recently Completed
+- **CF Workflows POC** — `SkillWorkflow` with durable `step.do()` execution, automatic retries, checkpointing
+- **DAG Workflow Engine** — Parallel layer execution with Kahn's algorithm, $context support, callbackUrl webhooks
+- **Production hardening** — CORS lockdown, per-API-key rate limiting, production config template
+
+### Architecture Summary
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         Cortex Runtime                          │
+├─────────────────────────────────────────────────────────────────┤
+│  Routes: /v1/workflows, /v1/chat, /v1/sessions, /v1/skills     │
+│  ├─ SupervisorAgent (LLM agentic loop with tool calling)       │
+│  ├─ WorkflowEngine (sequential, pause/resume, DB persistence)  │
+│  ├─ DAGWorkflowEngine (parallel layers, conditions, retries)   │
+│  └─ CF SkillWorkflow (durable execution POC)                   │
+├─────────────────────────────────────────────────────────────────┤
+│  Execution Router (5 layers)                                    │
+│  ├─ L0: mcp-remote (HTTP to external MCP)                      │
+│  ├─ L1: instructions (SKILL.md for LLM)                        │
+│  ├─ L2: worker (Cloudflare Workers)                            │
+│  ├─ L3: container (Daytona sandbox)                            │
+│  └─ Codegen fallback (LLM generates code → Daytona)            │
+├─────────────────────────────────────────────────────────────────┤
+│  External Services                                              │
+│  ├─ Runics (skill registry, trust scores)                      │
+│  ├─ Daytona (sandboxed code execution)                         │
+│  ├─ LLM Proxy (llmproxy.xus.one → OpenRouter/Workers AI)       │
+│  └─ Neon Postgres (via Hyperdrive)                             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Bindings Active
+- `WORKFLOW_DO` — Durable Object for workflow state
+- `SKILL_WORKFLOW` — CF Workflow for durable skill execution
+- `SESSION_CACHE` / `WORKFLOW_STATE` — KV namespaces
+- `HYPERDRIVE` — Neon Postgres connection pooling
+- `R2_BUCKET` — Artifact storage
+- `ANALYTICS` — Analytics Engine metrics
+- `RUNICS_SERVICE` — Service binding to Runics worker
+
 ## Next Steps (Prioritized)
-1. Token-level streaming (stream LLM tokens to client as they arrive, not just tool events)
-2. Provision production environment (see `wrangler.production.toml`)
-3. Activepieces integration (triggers & events — webhooks, cron, email, Stripe, GitHub PRs)
-4. CF Workflows POC (durable execution with automatic retries/checkpointing)
+1. **Provision production** — Run `wrangler.production.toml` checklist for cognium account (`cortex.cognium.net`)
+2. **Register Runics skills** — Add `@runics/git-clone`, `@runics/secrets-scan`, `@runics/github-pr`
+3. **DAGWorkflow** — Extend CF Workflows to wrap DAGWorkflowEngine for full durable DAG execution
+4. **Token-level streaming** — Stream LLM tokens to client as they arrive (not just tool events)
+5. **Activepieces integration** — Triggers & events (webhooks, cron, email, Stripe, GitHub PRs)
