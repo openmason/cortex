@@ -69,6 +69,12 @@ WORKFLOW_TIMEOUT_MS = "300000"
 MAX_SKILL_CHAIN_DEPTH = "10"
 CF_ACCOUNT_ID = "1f59f4dcd0ebb559e3c392566978d446"
 
+# --- Workflows ---
+[[workflows]]
+name = "skill-workflow"
+binding = "SKILL_WORKFLOW"
+class_name = "SkillWorkflow"
+
 # --- Cron Triggers ---
 [triggers]
 crons = ["*/5 * * * *"]

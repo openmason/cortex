@@ -23,6 +23,9 @@ export interface Env {
   // Durable Objects
   WORKFLOW_DO: DurableObjectNamespace;
 
+  // Workflows (CF Workflows binding)
+  SKILL_WORKFLOW?: Workflow;
+
   // Service Bindings
   RUNICS_SERVICE?: Fetcher;
 
@@ -232,10 +235,10 @@ export interface RetryConfig {
 }
 
 /**
- * ExecutionLayer — A group of DAG steps that can execute in parallel.
+ * DAGExecutionLayer — A group of DAG steps that can execute in parallel.
  * Steps in the same layer have no interdependencies.
  */
-export interface ExecutionLayer {
+export interface DAGExecutionLayer {
   index: number;
   stepIds: string[];
 }

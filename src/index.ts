@@ -20,6 +20,9 @@ import { Metrics } from "./observability/metrics";
 // Re-export the Durable Object class (required by wrangler)
 export { WorkflowDurableObject } from "./workflow/durable-object";
 
+// Re-export the CF Workflow class (required by wrangler)
+export { SkillWorkflow } from "./workflow/cf-workflow";
+
 const app = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
 // ---------------------------------------------------------------------------

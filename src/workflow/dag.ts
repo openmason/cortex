@@ -2,19 +2,19 @@
  * DAG Utilities — Functions for working with DAG workflows.
  *
  * Implements the @runics/dag format utilities:
- * - toExecutionLayers(): Convert DAG to parallelizable execution layers
+ * - toDAGExecutionLayers(): Convert DAG to parallelizable execution layers
  * - evaluateCondition(): Evaluate step conditions against outputs
  * - resolveInputs(): Resolve template expressions in input mappings
  */
 
-import type { WorkflowDAG, DAGStep, ExecutionLayer, DAGCondition } from "../types";
+import type { WorkflowDAG, DAGStep, DAGExecutionLayer, DAGCondition } from "../types";
 
 /**
  * Convert a DAG into execution layers.
  * Each layer contains steps that can run in parallel (no interdependencies).
  * Steps are grouped by dependency depth using Kahn's algorithm.
  */
-export function toExecutionLayers(dag: WorkflowDAG): ExecutionLayer[] {
+export function toDAGExecutionLayers(dag: WorkflowDAG): DAGExecutionLayer[] {
   const steps = dag.steps;
   const stepMap = new Map<string, DAGStep>();
   const inDegree = new Map<string, number>();
@@ -42,7 +42,7 @@ export function toExecutionLayers(dag: WorkflowDAG): ExecutionLayer[] {
   }
 
   // Kahn's algorithm to build layers
-  const layers: ExecutionLayer[] = [];
+  const layers: DAGExecutionLayer[] = [];
   const processed = new Set<string>();
 
   while (processed.size < steps.length) {
@@ -186,7 +186,7 @@ export function validateDAG(dag: WorkflowDAG): { valid: boolean; errors: string[
   // Check for cycles by attempting to build layers
   if (errors.length === 0) {
     try {
-      toExecutionLayers(dag);
+      toDAGExecutionLayers(dag);
     } catch (e) {
       errors.push(e instanceof Error ? e.message : "Cycle detected in DAG");
     }
@@ -225,7 +225,7 @@ export function planToDAG(plan: { id: string; steps: Array<{ id: string; skill: 
  * Flattens parallel execution into sequential order.
  */
 export function dagToPlan(dag: WorkflowDAG): { id: string; steps: unknown[]; mode: string; createdAt: string } {
-  const layers = toExecutionLayers(dag);
+  const layers = toDAGExecutionLayers(dag);
   const orderedSteps: unknown[] = [];
   let order = 0;
 

@@ -481,8 +481,10 @@ describe("DAGWorkflowEngine", () => {
           return Promise.resolve({
             ok: true,
             json: () => Promise.resolve({
-              match: "exact",
-              skills: [makeSkill({ slug: "fetched-skill" })],
+              confidence: "high",
+              results: [makeSkill({ slug: "fetched-skill" })],
+              enriched: false,
+              meta: { latencyMs: 10, tier: 1, cacheHit: false, llmInvoked: false },
             }),
           });
         }

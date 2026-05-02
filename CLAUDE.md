@@ -7,7 +7,8 @@ Cloudflare Workers-based agent runtime that orchestrates skill discovery, planni
 - **Supervisor Agent** (`src/agents/supervisor.ts`) — LLM-powered agentic loop with tool calling (findSkill, checkPolicy, buildPlan, invokeSkill)
 - **Workflow Engine** (`src/workflow/engine.ts`) — orchestrates multi-step skill execution with pause/resume, input mapping ($prev, $step.N). Accepts optional `LLMClient` for codegen fallback in workflow steps.
 - **DAG Workflow Engine** (`src/workflow/dag-engine.ts`) — executes DAG-based workflows with parallel layer execution, condition evaluation, approval gates, and retry policies
-- **DAG Utilities** (`src/workflow/dag.ts`) — Kahn's algorithm for `toExecutionLayers()`, condition evaluation, DAG validation, plan↔DAG conversion
+- **DAG Utilities** (`src/workflow/dag.ts`) — Kahn's algorithm for `toDAGExecutionLayers()`, condition evaluation, DAG validation, plan↔DAG conversion
+- **CF Workflow POC** (`src/workflow/cf-workflow.ts`) — Cloudflare Workflows integration for durable skill execution with automatic checkpointing, retries, and state recovery
 - **Execution Router** (`src/execution/router.ts`) — dispatches to 5 layers: mcp-remote, instructions, worker, container, composite. Includes codegen fallback for skills with no executable bundle.
 - **Daytona Client** (`src/clients/daytona.ts`) — Uses `@daytonaio/sdk` for sandbox execution. Key methods: `execute()` (shell commands), `runCode()` (direct code execution via `codeRun()`), `cleanup()` (orphaned sandbox removal).
 - **Policy Engine** (`src/policy/engine.ts`) — tenant-level trust checks, appetite thresholds, sensitive categories
@@ -319,8 +320,22 @@ When a step has `requiresApproval: true`, the workflow pauses with status `pause
   2. Calls `DaytonaClient.cleanup()` to delete orphaned sandboxes
 - Backward compat: old states without `timeoutAt` are never lazily timed out
 
+## CF Workflows POC
+Experimental integration with Cloudflare Workflows for durable execution with automatic checkpointing.
+
+- **SkillWorkflow** (`src/workflow/cf-workflow.ts`) — Executes a single skill with durable steps
+  - `step.do("resolve-skill")` — Resolves skill from Runics with retry (3x, 5s delay, exponential backoff)
+  - `step.do("execute-skill")` — Executes via ExecutionRouter with retry (3x, 10s delay, exponential backoff)
+  - Automatic state persistence at each step boundary
+  - Configurable timeouts (30s resolve, 5m execute)
+- **Admin endpoints** for testing:
+  - `POST /admin/workflows/skill` — Trigger a SkillWorkflow instance
+  - `GET /admin/workflows/skill/:instanceId` — Get workflow status
+- **wrangler.toml binding**: `[[workflows]] name="skill-workflow" binding="SKILL_WORKFLOW" class_name="SkillWorkflow"`
+- **Next steps**: Implement DAGWorkflow that wraps DAGWorkflowEngine for full DAG durability
+
 ## Testing
-- 553 unit tests passing across 31 test files (`npx vitest run`)
+- 558 unit tests passing across 32 test files (`npx vitest run`)
 - Local dev tested with `npx wrangler dev` — health, models, and full run request all work
 - E2E verified live: codegen pipeline working end-to-end (findSkill → invokeSkill → codegen → Daytona → result)
 - E2E smoke test: `ADMIN_SECRET=<secret> npx tsx scripts/smoke-test.ts` (9 tests against live deployment)
@@ -338,7 +353,8 @@ When a step has `requiresApproval: true`, the workflow pauses with status `pause
 - `src/execution/router.ts` — Execution router with codegen fallback and retry
 - `src/workflow/engine.ts` — workflow orchestration with DB persistence, SSE events, and LLM passthrough
 - `src/workflow/dag-engine.ts` — DAG workflow executor with parallel layers, conditions, retries
-- `src/workflow/dag.ts` — DAG utilities (toExecutionLayers, evaluateCondition, validateDAG)
+- `src/workflow/dag.ts` — DAG utilities (toDAGExecutionLayers, evaluateCondition, validateDAG)
+- `src/workflow/cf-workflow.ts` — CF Workflows POC (SkillWorkflow with durable step execution)
 - `src/workflow/input-mapping.ts` — $prev/$step.N resolver
 - `src/conversation/manager.ts` — multi-turn conversation state management (KV-backed)
 - `src/db/schema.ts` — Drizzle schema (workflow_sessions, step_executions, execution_traces, tenant_policies, api_keys)

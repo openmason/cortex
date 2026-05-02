@@ -34,7 +34,7 @@ export class ExecutionRouter {
   async execute(
     skill: SkillReference,
     input: Record<string, unknown>,
-    context: ExecutionContext,
+    _context?: ExecutionContext,
   ): Promise<ExecutionResult> {
     const start = Date.now();
 

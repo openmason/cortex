@@ -141,4 +141,71 @@ app.get("/policies/:tenantId/:product", async (c) => {
   return c.json(policy);
 });
 
+// ---------------------------------------------------------------------------
+// CF Workflows Admin Routes (POC)
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /admin/workflows/skill — Trigger a SkillWorkflow instance
+ */
+const triggerWorkflowSchema = z.object({
+  skillSlug: z.string().min(1),
+  skillVersion: z.string().optional(),
+  input: z.record(z.unknown()).default({}),
+  tenantId: z.string().min(1),
+});
+
+app.post("/workflows/skill", async (c) => {
+  if (!c.env.SKILL_WORKFLOW) {
+    return c.json({ error: "CF Workflows not enabled in this environment" }, 501);
+  }
+
+  const body = await c.req.json();
+  const parsed = triggerWorkflowSchema.safeParse(body);
+
+  if (!parsed.success) {
+    return c.json({ error: "Invalid request", details: parsed.error.flatten() }, 400);
+  }
+
+  const requestId = c.req.header("X-Request-ID") ?? crypto.randomUUID();
+  const params = { ...parsed.data, requestId };
+
+  // Create a new workflow instance
+  const instance = await c.env.SKILL_WORKFLOW.create({ params });
+
+  return c.json({
+    instanceId: instance.id,
+    status: "queued",
+    params,
+  }, 202);
+});
+
+/**
+ * GET /admin/workflows/skill/:instanceId — Get SkillWorkflow instance status
+ */
+app.get("/workflows/skill/:instanceId", async (c) => {
+  if (!c.env.SKILL_WORKFLOW) {
+    return c.json({ error: "CF Workflows not enabled in this environment" }, 501);
+  }
+
+  const instanceId = c.req.param("instanceId");
+
+  try {
+    const instance = await c.env.SKILL_WORKFLOW.get(instanceId);
+    const status = await instance.status();
+
+    return c.json({
+      instanceId,
+      status: status.status,
+      output: status.output,
+      error: status.error,
+    });
+  } catch (err) {
+    return c.json({
+      error: "Workflow instance not found",
+      instanceId,
+    }, 404);
+  }
+});
+
 export default app;

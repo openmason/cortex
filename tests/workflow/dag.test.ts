@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
-  toExecutionLayers,
+  toDAGExecutionLayers,
   evaluateCondition,
   validateDAG,
   planToDAG,
@@ -30,7 +30,7 @@ function makeDAG(overrides: Partial<WorkflowDAG> = {}): WorkflowDAG {
 }
 
 describe("DAG Utilities", () => {
-  describe("toExecutionLayers", () => {
+  describe("toDAGExecutionLayers", () => {
     it("should create single layer for steps with no dependencies", () => {
       const dag = makeDAG({
         steps: [
@@ -40,7 +40,7 @@ describe("DAG Utilities", () => {
         ],
       });
 
-      const layers = toExecutionLayers(dag);
+      const layers = toDAGExecutionLayers(dag);
 
       expect(layers).toHaveLength(1);
       expect(layers[0].index).toBe(0);
@@ -58,7 +58,7 @@ describe("DAG Utilities", () => {
         ],
       });
 
-      const layers = toExecutionLayers(dag);
+      const layers = toDAGExecutionLayers(dag);
 
       expect(layers).toHaveLength(3);
       expect(layers[0].stepIds).toEqual(["a"]);
@@ -77,7 +77,7 @@ describe("DAG Utilities", () => {
         ],
       });
 
-      const layers = toExecutionLayers(dag);
+      const layers = toDAGExecutionLayers(dag);
 
       expect(layers).toHaveLength(3);
       expect(layers[0].stepIds).toEqual(["a"]);
@@ -97,7 +97,7 @@ describe("DAG Utilities", () => {
         ],
       });
 
-      const layers = toExecutionLayers(dag);
+      const layers = toDAGExecutionLayers(dag);
 
       expect(layers).toHaveLength(2);
       expect(layers[0].stepIds).toContain("a");
@@ -115,7 +115,7 @@ describe("DAG Utilities", () => {
         ],
       });
 
-      expect(() => toExecutionLayers(dag)).toThrow("Cycle detected");
+      expect(() => toDAGExecutionLayers(dag)).toThrow("Cycle detected");
     });
 
     it("should ignore dependencies on non-existent steps", () => {
@@ -126,7 +126,7 @@ describe("DAG Utilities", () => {
         ],
       });
 
-      const layers = toExecutionLayers(dag);
+      const layers = toDAGExecutionLayers(dag);
 
       expect(layers).toHaveLength(2);
       expect(layers[0].stepIds).toEqual(["a"]);

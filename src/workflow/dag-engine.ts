@@ -13,7 +13,7 @@ import type {
   Env,
   WorkflowDAG,
   DAGStep,
-  ExecutionLayer,
+  DAGExecutionLayer,
   TenantContext,
   SkillReference,
   ExecutionResult,
@@ -22,7 +22,7 @@ import type {
   ExecutionMode,
   OnStreamEvent,
 } from "../types";
-import { toExecutionLayers, evaluateCondition } from "./dag";
+import { toDAGExecutionLayers, evaluateCondition } from "./dag";
 import { ExecutionRouter } from "../execution/router";
 import { RunicsClient } from "../clients/runics";
 import { CogniumClient } from "../clients/cognium";
@@ -118,7 +118,7 @@ export class DAGWorkflowEngine {
 
     try {
       // Convert DAG to execution layers
-      const layers = toExecutionLayers(dag);
+      const layers = toDAGExecutionLayers(dag);
       this.log?.debug("DAG converted to layers", {
         workflowId: dag.id,
         layerCount: layers.length,
@@ -256,7 +256,7 @@ export class DAGWorkflowEngine {
    */
   private async executeLayer(
     dag: WorkflowDAG,
-    layer: ExecutionLayer,
+    layer: DAGExecutionLayer,
     outputs: Record<string, unknown>,
     context: DAGExecutionContext,
     executionCtx: ExecutionContext,
@@ -382,7 +382,7 @@ export class DAGWorkflowEngine {
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        const result = await this.executor.execute(skill, input, context.tenantId);
+        const result = await this.executor.execute(skill, input);
 
         if (result.success) {
           step.status = "completed";
@@ -472,11 +472,15 @@ export class DAGWorkflowEngine {
       return skill;
     } else {
       // Dynamic binding: skillRef is a natural language query
-      const searchResult = await this.runics.findSkill(step.skillRef, context.appetite);
-      if (searchResult.match === "no_match" || !searchResult.skills?.length) {
+      const searchResult = await this.runics.findSkill({
+        query: step.skillRef,
+        tenantId: context.tenantId,
+        appetite: context.appetite,
+      });
+      if (searchResult.confidence === "no_match" || !searchResult.results?.length) {
         return null;
       }
-      return searchResult.skills[0];
+      return searchResult.results[0];
     }
   }
 
@@ -637,7 +641,7 @@ export class DAGWorkflowEngine {
     state.status = "running";
 
     try {
-      const layers = toExecutionLayers(dag);
+      const layers = toDAGExecutionLayers(dag);
 
       // If paused at a specific step (approval gate), mark it as approved and continue
       if (state.pausedStepId) {
