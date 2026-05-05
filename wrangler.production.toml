@@ -1,9 +1,10 @@
 # =============================================================================
 # PRODUCTION - cortex.cognium.net
 # Deploy: npx wrangler deploy --config wrangler.production.toml
-# Account: cognium (TODO: add account ID)
+# Account: cognium (bb8e02ea0ca7c225d2fb62d24a9940be)
 # =============================================================================
 
+account_id = "bb8e02ea0ca7c225d2fb62d24a9940be"
 name = "cortex"
 main = "src/index.ts"
 compatibility_date = "2025-02-01"
@@ -27,27 +28,24 @@ tag = "v1"
 new_sqlite_classes = ["WorkflowDurableObject"]
 
 # --- KV Namespaces ---
-# Create with: npx wrangler kv:namespace create SESSION_CACHE --config wrangler.production.toml
 [[kv_namespaces]]
 binding = "SESSION_CACHE"
-id = "TODO_SESSION_CACHE_ID"
+id = "d827ec6be74641ee8fa53a0af4cd7e1b"
 
-# Create with: npx wrangler kv:namespace create WORKFLOW_STATE --config wrangler.production.toml
 [[kv_namespaces]]
 binding = "WORKFLOW_STATE"
-id = "TODO_WORKFLOW_STATE_ID"
+id = "d4180b7f747f47baa0c36f24b75dd0ef"
 
 # --- Hyperdrive (Production Postgres) ---
 # Create with: npx wrangler hyperdrive create cortex-prod --connection-string="postgres://..."
 [[hyperdrive]]
 binding = "HYPERDRIVE"
-id = "TODO_HYPERDRIVE_ID"
+id = "c9aee067341446239e483dbf6df25f96"
 
 # --- R2 ---
-# Create with: npx wrangler r2 bucket create cortex-artifacts-prod
 [[r2_buckets]]
 binding = "R2_BUCKET"
-bucket_name = "cortex-artifacts-prod"
+bucket_name = "cortex-artifacts"
 
 # --- Service Bindings ---
 # Note: Runics must also be deployed to the cognium account
@@ -78,42 +76,37 @@ DEFAULT_EXECUTION_MODE = "review_before_run"
 DEFAULT_APPETITE = "balanced"
 WORKFLOW_TIMEOUT_MS = "300000"
 MAX_SKILL_CHAIN_DEPTH = "10"
-CF_ACCOUNT_ID = "TODO_COGNIUM_ACCOUNT_ID"
+CF_ACCOUNT_ID = "bb8e02ea0ca7c225d2fb62d24a9940be"
+
+# --- Workflows ---
+[[workflows]]
+name = "skill-workflow"
+binding = "SKILL_WORKFLOW"
+class_name = "SkillWorkflow"
 
 # --- Cron Triggers ---
 [triggers]
 crons = ["*/5 * * * *"]
 
 # =============================================================================
-# SETUP CHECKLIST
+# INFRASTRUCTURE (Provisioned)
 # =============================================================================
-# 1. Switch to cognium account:
-#    npx wrangler whoami
-#    npx wrangler login (if needed)
+# KV Namespaces:
+#   SESSION_CACHE: d827ec6be74641ee8fa53a0af4cd7e1b
+#   WORKFLOW_STATE: d4180b7f747f47baa0c36f24b75dd0ef
 #
-# 2. Create KV namespaces:
-#    npx wrangler kv:namespace create SESSION_CACHE --config wrangler.production.toml
-#    npx wrangler kv:namespace create WORKFLOW_STATE --config wrangler.production.toml
-#    -> Update IDs above
+# Hyperdrive:
+#   cortex-db: c9aee067341446239e483dbf6df25f96
 #
-# 3. Create Hyperdrive:
-#    npx wrangler hyperdrive create cortex-prod --connection-string="postgresql://user:pass@host/db"
-#    -> Update ID above
+# R2 Bucket:
+#   cortex-artifacts
 #
-# 4. Create R2 bucket:
-#    npx wrangler r2 bucket create cortex-artifacts-prod
+# Secrets (set via `npx wrangler secret put <name> --name cortex`):
+#   ADMIN_SECRET, DATABASE_URL, DAYTONA_API_KEY, LLMPROXY_API_KEY
 #
-# 5. Set secrets:
-#    npx wrangler secret put ADMIN_SECRET --config wrangler.production.toml
-#    npx wrangler secret put LLMPROXY_API_KEY --config wrangler.production.toml
-#    npx wrangler secret put DAYTONA_API_KEY --config wrangler.production.toml
-#    npx wrangler secret put CF_API_TOKEN --config wrangler.production.toml
+# Service Binding:
+#   RUNICS_SERVICE -> runics (deployed to cognium account)
 #
-# 6. Deploy Runics to cognium account first (service binding dependency)
-#
-# 7. Deploy Cortex:
-#    npx wrangler deploy --config wrangler.production.toml
-#
-# 8. Configure custom domain in CF dashboard:
-#    cortex.cognium.net -> cortex worker
+# Deploy:
+#   npx wrangler deploy --config wrangler.production.toml
 # =============================================================================
