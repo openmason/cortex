@@ -495,3 +495,21 @@ Key differences between the master spec (`/Users/eyal/work/openmason/cortex.md`)
 3. **DAGWorkflow** — Extend CF Workflows to wrap DAGWorkflowEngine for full durable DAG execution
 4. **Token-level streaming** — Stream LLM tokens to client as they arrive (not just tool events)
 5. **Activepieces integration** — Triggers & events (webhooks, cron, email, Stripe, GitHub PRs)
+
+## Deferred / Revisit
+
+### Mastra Integration (Revisit: June 2026)
+`@mastra/core` (0.5.0) and `@mastra/cloudflare` (0.1.4) are in `package.json` but unused. Analysis (May 2026):
+
+**Why not used:**
+- `@mastra/cloudflare` is only a KV storage adapter, not CF Workers deployment
+- No CF Workflows, Durable Objects, or Hyperdrive integration
+- Cortex has custom implementations: SupervisorAgent (710 LOC), WorkflowEngine (469 LOC), DAGWorkflowEngine (867 LOC), ConversationManager (205 LOC) — all tested (558 tests)
+- Tight coupling to Cortex-specific execution model (5 layers, codegen fallback, Runics/Daytona integration)
+
+**Revisit when:**
+- Mastra adds native CF Workflows integration
+- Mastra adds Durable Objects support
+- Major refactor is needed anyway
+
+**Decision:** Keep deps, revisit June 2026 after Mastra v1.x matures
