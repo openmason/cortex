@@ -373,7 +373,13 @@ Experimental integration with Cloudflare Workflows for durable execution with au
 - `.dev.vars` — local secrets (LLMPROXY_API_KEY, DAYTONA_API_KEY, DATABASE_URL, ADMIN_SECRET)
 
 ## Spec
-Master specification: `cortex-specification.md`
+Master specification: `/Users/eyal/work/openmason/cortex.md` (source of truth)
+Related specs in `/Users/eyal/work/openmason/`:
+- `architecture.md` — Cognium Labs overall architecture
+- `runics.md` — Skill registry specification
+- `principles.md` — Cross-product design principles
+- `skill-convention.md` — First-party skill authoring conventions
+- `forge.md` — Skill distillation (decoupled from Cortex)
 
 ## DB Driver
 - Uses `postgres` (postgres.js) with `drizzle-orm/postgres-js` — NOT `@neondatabase/serverless`
@@ -405,7 +411,7 @@ Cognium and Forge queue integrations have been removed. What remains:
 
 ## Architecture Decisions — Spec vs Reality
 
-Key differences between the spec docs (`cortex-specification.md`, `runics-unified-architecture.md`) and what's actually built. These are intentional — revisit as needed.
+Key differences between the master spec (`/Users/eyal/work/openmason/cortex.md`) and what's actually built. These are intentional — revisit as needed.
 
 ### Mastra — Not Used (Future Integration)
 - `@mastra/core` (0.5.0) and `@mastra/cloudflare` (0.1.0) are in `package.json` but **zero imports** exist.
