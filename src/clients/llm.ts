@@ -230,8 +230,9 @@ export class LLMClient {
       throw new Error(`LLM proxy request failed: ${res.status} ${text}`);
     }
 
-    const proxyReqId = res.headers?.get?.("X-Proxy-Request-ID") ?? undefined;
     const response: ChatCompletionResponse = await res.json();
+
+    const proxyReqId = res.headers?.get?.("X-Proxy-Request-ID") ?? undefined;
     const durationMs = Date.now() - start;
     const tokens = response.usage.total_tokens;
 

@@ -17,18 +17,33 @@ import type { Metrics } from "../observability/metrics";
  * the router asks the LLM to generate code and executes it in a Daytona sandbox.
  */
 export class ExecutionRouter {
-  private daytona: DaytonaClient;
+  private _daytona: DaytonaClient | null = null;
   private workerDispatch: WorkerDispatch;
   private llm: LLMClient | null;
+  private env: Env;
   private log?: Logger;
   private metrics?: Metrics;
 
   constructor(env: Env, llm?: LLMClient, log?: Logger, metrics?: Metrics) {
-    this.daytona = new DaytonaClient(env, log?.child({ module: "daytona" }), metrics);
+    this.env = env;
     this.workerDispatch = new WorkerDispatch(env);
     this.llm = llm ?? null;
     this.log = log;
     this.metrics = metrics;
+  }
+
+  /**
+   * Lazy initialization of DaytonaClient to avoid errors when DAYTONA_API_KEY is not set.
+   * Only throws when Daytona is actually needed (L3/container execution or codegen).
+   */
+  private get daytona(): DaytonaClient {
+    if (!this._daytona) {
+      if (!this.env.DAYTONA_API_KEY) {
+        throw new Error("DAYTONA_API_KEY is not configured. Container execution and codegen are unavailable.");
+      }
+      this._daytona = new DaytonaClient(this.env, this.log?.child({ module: "daytona" }), this.metrics);
+    }
+    return this._daytona;
   }
 
   async execute(
