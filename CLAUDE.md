@@ -61,8 +61,20 @@ Runics (registry) ──→ Cognium (internal trust/scanning)
 - **Service Binding**: `RUNICS_SERVICE` → `runics` worker
 
 ## Deploy Status
-- **Live at**: `https://cortex.phantoms.workers.dev`
-- Secrets set: LLMPROXY_API_KEY, DAYTONA_API_KEY (placeholder), DATABASE_URL, ADMIN_SECRET
+
+### Production
+- **URL**: `https://cortex.cognium.net`
+- **Account**: cognium (bb8e02ea0ca7c225d2fb62d24a9940be)
+- **Secrets**: ADMIN_SECRET, DATABASE_URL, LLMPROXY_API_KEY (DAYTONA_API_KEY not yet set)
+- **Config**: `wrangler.production.toml`
+
+### Staging
+- **URL**: `https://cortex.phantoms.workers.dev`
+- **Account**: phantoms (1f59f4dcd0ebb559e3c392566978d446)
+- **Secrets**: LLMPROXY_API_KEY, DAYTONA_API_KEY, DATABASE_URL, ADMIN_SECRET
+- **Config**: `wrangler.toml`
+
+### Common
 - Schema already pushed to Neon DB (5 tables: workflow_sessions, step_executions, execution_traces, tenant_policies, api_keys)
 - Durable Objects use `new_sqlite_classes` migration (required for free plan)
 
@@ -133,12 +145,14 @@ When a skill has no executable bundle (no `mcpUrl`, no `skillMd`, no `r2BundleKe
 
 ## Daytona Integration
 - SDK: `@daytonaio/sdk` (direct API, not REST)
+- **Lazy initialization**: `ExecutionRouter` creates `DaytonaClient` only when L3/codegen execution is needed. Workflows work without `DAYTONA_API_KEY` set (fails gracefully only when container execution is attempted).
 - `DaytonaClient.execute()` — shell command execution in sandbox (with structured logging and `sandbox_exec` metrics)
 - `DaytonaClient.runCode()` — direct code execution via `codeRun()` (used by codegen fallback)
 - `DaytonaClient.cleanup()` — lists and deletes all sandboxes (called by cron)
 - Constructor accepts optional `Logger` and `Metrics` for observability; passed from `ExecutionRouter` and cron handler
 - Target region: `DAYTONA_TARGET` env var (default: `us`)
 - Sandbox lifecycle: create → execute → delete (always cleaned up in `finally` block)
+- **Setup**: Create API key at [app.daytona.io/dashboard/keys](https://app.daytona.io/dashboard/keys), set via `wrangler secret put DAYTONA_API_KEY`
 
 ## Rate Limiting
 - KV-based sliding window: 30 requests/minute per API key
@@ -369,7 +383,7 @@ Experimental integration with Cloudflare Workflows for durable execution with au
 - `src/routes/health.ts` — /health
 - `scripts/smoke-test.ts` — E2E smoke test against live deployment
 - `wrangler.toml` — staging config (phantoms account), all bindings with real IDs, cron trigger
-- `wrangler.production.toml` — production config template (cognium account), needs provisioning
+- `wrangler.production.toml` — production config (cognium account), fully provisioned
 - `.dev.vars` — local secrets (LLMPROXY_API_KEY, DAYTONA_API_KEY, DATABASE_URL, ADMIN_SECRET)
 
 ## Spec
@@ -441,18 +455,24 @@ Key differences between the master spec (`/Users/eyal/work/openmason/cortex.md`)
 - Spec lists Activepieces as the event/trigger layer (webhooks, cron, email, Stripe, GitHub PRs).
 - Not integrated. Would be a separate self-hosted service ($10/mo VPS).
 
-## Current State (2026-05-02)
+## Current State (2026-05-05)
 
-### Deployed to Staging
+### Production Deployed
+- **URL**: `https://cortex.cognium.net`
+- **Account**: cognium (bb8e02ea0ca7c225d2fb62d24a9940be)
+- **Health**: KV, DB (Hyperdrive), Runics all healthy
+- **Features verified**: /health, /v1/models, /v1/workflows, /v1/chat, /v1/sessions, /admin/*
+
+### Staging
 - **URL**: `https://cortex.phantoms.workers.dev`
 - **Account**: phantoms (1f59f4dcd0ebb559e3c392566978d446)
 - **Tests**: 558 passing across 32 test files
-- **Smoke tests**: 8 passed, 1 warn (Runics unavailable)
 
 ### Recently Completed
+- **Production deployment** — `cortex.cognium.net` with all infrastructure provisioned (KV, Hyperdrive, R2, Runics service binding)
+- **Lazy Daytona init** — `ExecutionRouter` now creates `DaytonaClient` only when needed, avoiding startup errors when `DAYTONA_API_KEY` is not set
 - **CF Workflows POC** — `SkillWorkflow` with durable `step.do()` execution, automatic retries, checkpointing
 - **DAG Workflow Engine** — Parallel layer execution with Kahn's algorithm, $context support, callbackUrl webhooks
-- **Production hardening** — CORS lockdown, per-API-key rate limiting, production config template
 
 ### Architecture Summary
 ```
@@ -490,7 +510,7 @@ Key differences between the master spec (`/Users/eyal/work/openmason/cortex.md`)
 - `RUNICS_SERVICE` — Service binding to Runics worker
 
 ## Next Steps (Prioritized)
-1. **Provision production** — Run `wrangler.production.toml` checklist for cognium account (`cortex.cognium.net`)
+1. **Set up Daytona** — Create API key at [app.daytona.io](https://app.daytona.io/dashboard/keys), set in production via `wrangler secret put DAYTONA_API_KEY --config wrangler.production.toml`
 2. **Register Runics skills** — Add `@runics/git-clone`, `@runics/secrets-scan`, `@runics/github-pr`
 3. **DAGWorkflow** — Extend CF Workflows to wrap DAGWorkflowEngine for full durable DAG execution
 4. **Token-level streaming** — Stream LLM tokens to client as they arrive (not just tool events)
