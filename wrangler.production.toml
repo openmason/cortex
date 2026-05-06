@@ -101,8 +101,12 @@ crons = ["*/5 * * * *"]
 # R2 Bucket:
 #   cortex-artifacts
 #
-# Secrets (set via `npx wrangler secret put <name> --name cortex`):
-#   ADMIN_SECRET, DATABASE_URL, DAYTONA_API_KEY, LLMPROXY_API_KEY
+# Secrets (set via `npx wrangler secret put <name> --config wrangler.production.toml`):
+#   ADMIN_SECRET      - set
+#   DATABASE_URL      - set
+#   LLMPROXY_API_KEY  - set
+#   DAYTONA_API_KEY   - NOT SET (optional, needed for L3/container execution)
+#                       Create at: https://app.daytona.io/dashboard/keys
 #
 # Service Binding:
 #   RUNICS_SERVICE -> runics (deployed to cognium account)
