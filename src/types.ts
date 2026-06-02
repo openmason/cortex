@@ -64,8 +64,11 @@ export interface ApiKeyData {
   userId: string;
   product: Product;
   scopes: string[];
+  source?: ApiKeySource;
   createdAt: string;
 }
+
+export type ApiKeySource = "chat" | "job" | "webhook" | "api";
 
 export interface AppVariables {
   tenantId: string;
@@ -504,6 +507,59 @@ export interface ResumeRequest {
   workflowId: string;
   approved: boolean;
   modifiedPlan?: WorkflowPlan;
+}
+
+// ---------------------------------------------------------------------------
+// Audit Log (Mandate v0.5)
+// ---------------------------------------------------------------------------
+export type AuditAction =
+  | "api_key.create"
+  | "api_key.revoke"
+  | "policy.create"
+  | "policy.update"
+  | "workflow.run"
+  | "workflow.resume"
+  | "workflow.terminate"
+  | "session.delete"
+  | "conversation.delete"
+  | "composite.update"
+  | "composite.deprecate"
+  | "composite.fork";
+
+export type AuditResourceType =
+  | "api_key"
+  | "policy"
+  | "workflow"
+  | "session"
+  | "conversation"
+  | "composite";
+
+export type AuditStatus = "success" | "failure" | "denied";
+
+export interface AuditEntry {
+  id?: string;
+  tenantId: string;
+  userId?: string;
+  action: AuditAction;
+  resourceType: AuditResourceType;
+  resourceId?: string;
+  metadata?: Record<string, unknown>;
+  requestId?: string;
+  ipAddress?: string;
+  userAgent?: string;
+  status: AuditStatus;
+  errorMessage?: string;
+  createdAt?: string;
+}
+
+export interface AuditQueryFilters {
+  action?: AuditAction;
+  resourceType?: AuditResourceType;
+  resourceId?: string;
+  userId?: string;
+  status?: AuditStatus;
+  from?: string;
+  to?: string;
 }
 
 // ---------------------------------------------------------------------------

@@ -75,7 +75,7 @@ Runics (registry) ──→ Cognium (internal trust/scanning)
 - **Config**: `wrangler.toml`
 
 ### Common
-- Schema already pushed to Neon DB (5 tables: workflow_sessions, step_executions, execution_traces, tenant_policies, api_keys)
+- Schema already pushed to Neon DB (6 tables: workflow_sessions, step_executions, execution_traces, tenant_policies, api_keys, audit_log)
 - Durable Objects use `new_sqlite_classes` migration (required for free plan)
 
 ## Auth & Scopes
@@ -129,10 +129,30 @@ Runics (registry) ──→ Cognium (internal trust/scanning)
 - `POST /v1/approvals/:id/approve` — Approve a paused workflow (alias for resume)
 - `POST /v1/approvals/:id/reject` — Reject a paused workflow (alias for resume with approved=false)
 - `GET /v1/analytics/usage` — Usage analytics for tenant (7d window, daily + per-endpoint breakdowns)
-- `POST /admin/api-keys` — Create API key
+- `POST /admin/api-keys` — Create API key (supports `source` field: chat, job, webhook, api)
+- `GET /admin/api-keys` — List API keys (not fully implemented)
 - `DELETE /admin/api-keys/:key` — Revoke API key
 - `PUT /admin/policies` — Upsert tenant policy
 - `GET /admin/policies/:tenantId/:product` — Get tenant policy
+- `GET /admin/audit` — Query audit log (filters: action, resourceType, userId, status, from, to)
+
+## Mandate v0.5 (Audit & Governance)
+Mandate functionality is built into Cortex rather than as a separate package. Products call Cortex admin APIs for governance features.
+
+### Audit Log
+- All admin mutations are logged to `audit_log` table in Postgres
+- Actions: `api_key.create`, `api_key.revoke`, `policy.create`, `policy.update`, `workflow.run`, `workflow.resume`, etc.
+- Each entry includes: tenantId, userId, action, resourceType, resourceId, metadata, requestId, ipAddress, userAgent, status
+- Query via `GET /admin/audit?tenantId=...&action=...&from=...&to=...`
+
+### API Key Source
+- API keys now have a `source` field indicating allowed usage context
+- Valid sources: `chat`, `job`, `webhook`, `api` (default)
+- Source is logged in audit entries for traceability
+
+### DB Tables (added in v0.5)
+- `audit_log` — audit trail for admin operations
+- `api_keys.source` — new column for key source tracking
 
 ## Codegen Fallback
 When a skill has no executable bundle (no `mcpUrl`, no `skillMd`, no `r2BundleKey`), the ExecutionRouter uses LLM-generated code executed in a Daytona sandbox:

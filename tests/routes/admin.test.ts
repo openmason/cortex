@@ -3,6 +3,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const mockCreateApiKey = vi.fn().mockResolvedValue(undefined);
 const mockRevokeApiKey = vi.fn().mockResolvedValue(undefined);
 const mockGetApiKey = vi.fn().mockResolvedValue(null);
+const mockWriteAuditEntry = vi.fn().mockResolvedValue(undefined);
+const mockQueryAuditLog = vi.fn().mockResolvedValue([]);
+const mockCountAuditEntries = vi.fn().mockResolvedValue(0);
 
 vi.mock("../../src/db/repository", () => ({
   WorkflowRepository: vi.fn().mockImplementation(() => ({
@@ -16,6 +19,9 @@ vi.mock("../../src/db/repository", () => ({
     recordStepExecution: vi.fn(),
     writeTrace: vi.fn(),
     markTraceAsSaved: vi.fn(),
+    writeAuditEntry: mockWriteAuditEntry,
+    queryAuditLog: mockQueryAuditLog,
+    countAuditEntries: mockCountAuditEntries,
   })),
 }));
 
@@ -77,6 +83,9 @@ describe("Admin Routes", () => {
     mockCreateApiKey.mockResolvedValue(undefined);
     mockRevokeApiKey.mockResolvedValue(undefined);
     mockGetApiKey.mockResolvedValue(null);
+    mockWriteAuditEntry.mockResolvedValue(undefined);
+    mockQueryAuditLog.mockResolvedValue([]);
+    mockCountAuditEntries.mockResolvedValue(0);
     env = makeMockEnv();
   });
 
@@ -257,6 +266,132 @@ describe("Admin Routes", () => {
       // Verify KV cache eviction
       expect(env.SESSION_CACHE.delete).toHaveBeenCalledWith(
         "apikey:ctx_somekey12345",
+      );
+    });
+  });
+
+  describe("POST /admin/api-keys with source", () => {
+    it("should create an API key with custom source", async () => {
+      const res = await app.fetch(
+        new Request("http://localhost/admin/api-keys", {
+          method: "POST",
+          headers: { ...adminHeaders(), "Content-Type": "application/json" },
+          body: JSON.stringify({
+            tenantId: "t1",
+            userId: "u1",
+            product: "bombastic",
+            source: "webhook",
+          }),
+        }),
+        env,
+        ctx,
+      );
+
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as any;
+      expect(body.source).toBe("webhook");
+
+      // Verify it was persisted to DB with source
+      expect(mockCreateApiKey).toHaveBeenCalledWith(
+        body.key,
+        expect.objectContaining({
+          source: "webhook",
+        }),
+      );
+
+      // Verify audit entry was written
+      expect(mockWriteAuditEntry).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tenantId: "t1",
+          action: "api_key.create",
+          resourceType: "api_key",
+          status: "success",
+        }),
+      );
+    });
+
+    it("should default source to api", async () => {
+      const res = await app.fetch(
+        new Request("http://localhost/admin/api-keys", {
+          method: "POST",
+          headers: { ...adminHeaders(), "Content-Type": "application/json" },
+          body: JSON.stringify({
+            tenantId: "t1",
+            userId: "u1",
+            product: "bombastic",
+          }),
+        }),
+        env,
+        ctx,
+      );
+
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as any;
+      expect(body.source).toBe("api");
+    });
+  });
+
+  describe("GET /admin/audit", () => {
+    it("should return audit entries for tenant", async () => {
+      mockQueryAuditLog.mockResolvedValue([
+        {
+          id: "audit-1",
+          tenantId: "t1",
+          userId: "u1",
+          action: "api_key.create",
+          resourceType: "api_key",
+          resourceId: "ctx_abc123",
+          status: "success",
+          createdAt: "2026-05-18T12:00:00Z",
+        },
+      ]);
+      mockCountAuditEntries.mockResolvedValue(1);
+
+      const res = await app.fetch(
+        new Request("http://localhost/admin/audit?tenantId=t1", {
+          headers: adminHeaders(),
+        }),
+        env,
+        ctx,
+      );
+
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as any;
+      expect(body.entries).toHaveLength(1);
+      expect(body.total).toBe(1);
+      expect(body.entries[0].action).toBe("api_key.create");
+    });
+
+    it("should require tenantId parameter", async () => {
+      const res = await app.fetch(
+        new Request("http://localhost/admin/audit", {
+          headers: adminHeaders(),
+        }),
+        env,
+        ctx,
+      );
+
+      expect(res.status).toBe(400);
+    });
+
+    it("should support filtering by action", async () => {
+      mockQueryAuditLog.mockResolvedValue([]);
+      mockCountAuditEntries.mockResolvedValue(0);
+
+      const res = await app.fetch(
+        new Request("http://localhost/admin/audit?tenantId=t1&action=api_key.revoke", {
+          headers: adminHeaders(),
+        }),
+        env,
+        ctx,
+      );
+
+      expect(res.status).toBe(200);
+      expect(mockQueryAuditLog).toHaveBeenCalledWith(
+        "t1",
+        expect.objectContaining({ action: "api_key.revoke" }),
+        50,
+        0,
       );
     });
   });

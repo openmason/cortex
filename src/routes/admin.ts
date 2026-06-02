@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import type { Env, ApiKeyData } from "../types";
+import type { Env, ApiKeyData, AuditEntry, AuditQueryFilters } from "../types";
 import { PolicyEngine, defaultPolicy } from "../policy/engine";
 import { WorkflowRepository } from "../db/repository";
 
@@ -17,17 +17,37 @@ app.use("*", async (c, next) => {
   await next();
 });
 
+/**
+ * Helper to write an audit entry.
+ * Non-blocking — errors are logged but don't fail the request.
+ */
+async function writeAudit(
+  env: Env,
+  entry: Omit<AuditEntry, "requestId" | "ipAddress" | "userAgent">,
+  req: Request,
+): Promise<void> {
+  const repo = new WorkflowRepository(env);
+  await repo.writeAuditEntry({
+    ...entry,
+    requestId: req.headers.get("X-Request-ID") ?? undefined,
+    ipAddress: req.headers.get("CF-Connecting-IP") ?? undefined,
+    userAgent: req.headers.get("User-Agent") ?? undefined,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // POST /admin/api-keys — Create an API key
 // ---------------------------------------------------------------------------
 // "workflows" is the primary scope (spec v2); "run" kept for backward compatibility
 const VALID_SCOPES = ["workflows", "run", "sessions", "skills", "models"] as const;
+const VALID_SOURCES = ["chat", "job", "webhook", "api"] as const;
 
 const createKeySchema = z.object({
   tenantId: z.string().min(1),
   userId: z.string().min(1),
   product: z.enum(["bombastic", "costaff", "controlcenter"]),
   scopes: z.array(z.enum(VALID_SCOPES)).default(["workflows", "sessions"]),
+  source: z.enum(VALID_SOURCES).default("api"),
 });
 
 app.post("/api-keys", async (c) => {
@@ -59,7 +79,35 @@ app.post("/api-keys", async (c) => {
     // Non-critical — auth middleware will backfill from DB on miss
   }
 
+  // Audit log
+  await writeAudit(c.env, {
+    tenantId: data.tenantId,
+    userId: data.userId,
+    action: "api_key.create",
+    resourceType: "api_key",
+    resourceId: key.slice(0, 12), // Log prefix only for security
+    metadata: { product: data.product, scopes: data.scopes, source: data.source },
+    status: "success",
+  }, c.req.raw);
+
   return c.json({ key, ...data }, 201);
+});
+
+// ---------------------------------------------------------------------------
+// GET /admin/api-keys — List API keys for a tenant
+// ---------------------------------------------------------------------------
+app.get("/api-keys", async (c) => {
+  const tenantId = c.req.query("tenantId");
+  if (!tenantId) {
+    return c.json({ error: "tenantId query parameter required" }, 400);
+  }
+
+  // For now, return a message that listing isn't fully implemented
+  // (would need to add a listApiKeys method to repository)
+  return c.json({
+    message: "API key listing not yet implemented. Use database directly for now.",
+    tenantId,
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -67,6 +115,7 @@ app.post("/api-keys", async (c) => {
 // ---------------------------------------------------------------------------
 app.delete("/api-keys/:key", async (c) => {
   const key = c.req.param("key");
+  const tenantId = c.req.query("tenantId") ?? "unknown";
 
   // Revoke in DB (source of truth)
   const repo = new WorkflowRepository(c.env);
@@ -78,6 +127,15 @@ app.delete("/api-keys/:key", async (c) => {
   } catch {
     // Non-critical — TTL will expire the cache entry
   }
+
+  // Audit log
+  await writeAudit(c.env, {
+    tenantId,
+    action: "api_key.revoke",
+    resourceType: "api_key",
+    resourceId: key.slice(0, 12),
+    status: "success",
+  }, c.req.raw);
 
   return c.json({ deleted: true });
 });
@@ -115,6 +173,11 @@ app.put("/policies", async (c) => {
   };
 
   const repo = new WorkflowRepository(c.env);
+
+  // Check if policy exists to determine action
+  const existing = await repo.loadPolicy(policy.tenantId, policy.product);
+  const action = existing ? "policy.update" : "policy.create";
+
   await repo.upsertPolicy(policy);
 
   // Invalidate KV cache
@@ -124,6 +187,16 @@ app.put("/policies", async (c) => {
   } catch {
     // Non-critical
   }
+
+  // Audit log
+  await writeAudit(c.env, {
+    tenantId: policy.tenantId,
+    action,
+    resourceType: "policy",
+    resourceId: `${policy.tenantId}:${policy.product}`,
+    metadata: { product: policy.product, changes: parsed.data },
+    status: "success",
+  }, c.req.raw);
 
   return c.json(policy);
 });
@@ -139,6 +212,47 @@ app.get("/policies/:tenantId/:product", async (c) => {
   const policy = await policyEngine.loadPolicy(tenantId, product);
 
   return c.json(policy);
+});
+
+// ---------------------------------------------------------------------------
+// GET /admin/audit — Query audit log
+// ---------------------------------------------------------------------------
+const auditQuerySchema = z.object({
+  tenantId: z.string().min(1),
+  action: z.string().optional(),
+  resourceType: z.string().optional(),
+  resourceId: z.string().optional(),
+  userId: z.string().optional(),
+  status: z.enum(["success", "failure", "denied"]).optional(),
+  from: z.string().optional(), // ISO date string
+  to: z.string().optional(), // ISO date string
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
+app.get("/audit", async (c) => {
+  const query = c.req.query();
+  const parsed = auditQuerySchema.safeParse(query);
+
+  if (!parsed.success) {
+    return c.json({ error: "Invalid request", details: parsed.error.flatten() }, 400);
+  }
+
+  const { tenantId, limit, offset, ...filters } = parsed.data;
+
+  const repo = new WorkflowRepository(c.env);
+
+  const [entries, total] = await Promise.all([
+    repo.queryAuditLog(tenantId, filters as AuditQueryFilters, limit, offset),
+    repo.countAuditEntries(tenantId, filters as AuditQueryFilters),
+  ]);
+
+  return c.json({
+    entries,
+    total,
+    limit,
+    offset,
+  });
 });
 
 // ---------------------------------------------------------------------------

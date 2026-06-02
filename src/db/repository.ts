@@ -1,8 +1,8 @@
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { eq, and, desc, isNull, like, gte, lte, type SQL } from "drizzle-orm";
-import type { Env, WorkflowState, WorkflowPlan, ExecutionResult, ApiKeyData } from "../types";
-import { workflowSessions, workflowStepExecutions, executionTraces, tenantPolicies, apiKeys } from "./schema";
+import type { Env, WorkflowState, WorkflowPlan, ExecutionResult, ApiKeyData, AuditEntry, AuditQueryFilters } from "../types";
+import { workflowSessions, workflowStepExecutions, executionTraces, tenantPolicies, apiKeys, auditLog } from "./schema";
 import type { TenantPolicy } from "../policy/engine";
 import type { Logger } from "../observability/logger";
 
@@ -357,6 +357,7 @@ export class WorkflowRepository {
         userId: data.userId,
         product: data.product,
         scopes: data.scopes,
+        source: data.source ?? "api",
         createdAt: new Date(data.createdAt),
       });
     } catch (err) {
@@ -384,6 +385,7 @@ export class WorkflowRepository {
         userId: row.userId,
         product: row.product as ApiKeyData["product"],
         scopes: row.scopes as string[],
+        source: (row.source as ApiKeyData["source"]) ?? "api",
         createdAt: row.createdAt?.toISOString() ?? new Date().toISOString(),
       };
     } catch (err) {
@@ -453,6 +455,146 @@ export class WorkflowRepository {
       }
     } catch (err) {
       this.log?.error("Failed to upsert policy", { error: err instanceof Error ? err.message : String(err), tenantId: policy.tenantId, product: policy.product });
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Audit Log (Mandate v0.5)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Write an audit log entry.
+   * This is a synchronous write — audit entries are critical for compliance.
+   */
+  async writeAuditEntry(entry: AuditEntry): Promise<void> {
+    try {
+      await this.db.insert(auditLog).values({
+        tenantId: entry.tenantId,
+        userId: entry.userId ?? null,
+        action: entry.action,
+        resourceType: entry.resourceType,
+        resourceId: entry.resourceId ?? null,
+        metadata: entry.metadata ?? null,
+        requestId: entry.requestId ?? null,
+        ipAddress: entry.ipAddress ?? null,
+        userAgent: entry.userAgent ?? null,
+        status: entry.status,
+        errorMessage: entry.errorMessage ?? null,
+      });
+    } catch (err) {
+      // Audit write failures are logged but don't throw — we don't want to break the primary operation
+      this.log?.error("Failed to write audit entry", {
+        error: err instanceof Error ? err.message : String(err),
+        tenantId: entry.tenantId,
+        action: entry.action,
+      });
+    }
+  }
+
+  /**
+   * Query audit log entries with filters.
+   */
+  async queryAuditLog(
+    tenantId: string,
+    filters?: AuditQueryFilters,
+    limit = 50,
+    offset = 0,
+  ): Promise<AuditEntry[]> {
+    try {
+      const conditions: SQL[] = [eq(auditLog.tenantId, tenantId)];
+
+      if (filters?.action) {
+        conditions.push(eq(auditLog.action, filters.action));
+      }
+      if (filters?.resourceType) {
+        conditions.push(eq(auditLog.resourceType, filters.resourceType));
+      }
+      if (filters?.resourceId) {
+        conditions.push(eq(auditLog.resourceId, filters.resourceId));
+      }
+      if (filters?.userId) {
+        conditions.push(eq(auditLog.userId, filters.userId));
+      }
+      if (filters?.status) {
+        conditions.push(eq(auditLog.status, filters.status));
+      }
+      if (filters?.from) {
+        conditions.push(gte(auditLog.createdAt, new Date(filters.from)));
+      }
+      if (filters?.to) {
+        conditions.push(lte(auditLog.createdAt, new Date(filters.to)));
+      }
+
+      const rows = await this.db
+        .select()
+        .from(auditLog)
+        .where(and(...conditions))
+        .orderBy(desc(auditLog.createdAt))
+        .limit(limit)
+        .offset(offset);
+
+      return rows.map((row) => ({
+        id: row.id,
+        tenantId: row.tenantId,
+        userId: row.userId ?? undefined,
+        action: row.action as AuditEntry["action"],
+        resourceType: row.resourceType as AuditEntry["resourceType"],
+        resourceId: row.resourceId ?? undefined,
+        metadata: row.metadata as Record<string, unknown> | undefined,
+        requestId: row.requestId ?? undefined,
+        ipAddress: row.ipAddress ?? undefined,
+        userAgent: row.userAgent ?? undefined,
+        status: row.status as AuditEntry["status"],
+        errorMessage: row.errorMessage ?? undefined,
+        createdAt: row.createdAt?.toISOString(),
+      }));
+    } catch (err) {
+      this.log?.error("Failed to query audit log", {
+        error: err instanceof Error ? err.message : String(err),
+        tenantId,
+      });
+      return [];
+    }
+  }
+
+  /**
+   * Count audit log entries matching filters.
+   */
+  async countAuditEntries(tenantId: string, filters?: AuditQueryFilters): Promise<number> {
+    try {
+      const conditions: SQL[] = [eq(auditLog.tenantId, tenantId)];
+
+      if (filters?.action) {
+        conditions.push(eq(auditLog.action, filters.action));
+      }
+      if (filters?.resourceType) {
+        conditions.push(eq(auditLog.resourceType, filters.resourceType));
+      }
+      if (filters?.userId) {
+        conditions.push(eq(auditLog.userId, filters.userId));
+      }
+      if (filters?.status) {
+        conditions.push(eq(auditLog.status, filters.status));
+      }
+      if (filters?.from) {
+        conditions.push(gte(auditLog.createdAt, new Date(filters.from)));
+      }
+      if (filters?.to) {
+        conditions.push(lte(auditLog.createdAt, new Date(filters.to)));
+      }
+
+      const result = await this.db
+        .select()
+        .from(auditLog)
+        .where(and(...conditions));
+
+      return result.length;
+    } catch (err) {
+      this.log?.error("Failed to count audit entries", {
+        error: err instanceof Error ? err.message : String(err),
+        tenantId,
+      });
+      return 0;
     }
   }
 }

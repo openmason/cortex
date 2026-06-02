@@ -139,11 +139,48 @@ export const apiKeys = pgTable(
     userId: text("user_id").notNull(),
     product: text("product").notNull(),
     scopes: jsonb("scopes").notNull().$type<string[]>(),
+    // Source indicates where this key is allowed to be used from
+    source: text("source").default("api"), // 'chat' | 'job' | 'webhook' | 'api'
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   },
   (table) => [
     index("idx_api_keys_key").on(table.key),
     index("idx_api_keys_tenant").on(table.tenantId),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Audit Log (Mandate v0.5)
+// ---------------------------------------------------------------------------
+export const auditLog = pgTable(
+  "audit_log",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: text("tenant_id").notNull(),
+    userId: text("user_id"),
+    // Action performed: 'api_key.create', 'api_key.revoke', 'policy.update', 'workflow.run', etc.
+    action: text("action").notNull(),
+    // Resource type: 'api_key', 'policy', 'workflow', 'session', etc.
+    resourceType: text("resource_type").notNull(),
+    // Resource identifier (key prefix, policy id, workflow id, etc.)
+    resourceId: text("resource_id"),
+    // Additional context as JSON
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+    // Request context
+    requestId: text("request_id"),
+    ipAddress: text("ip_address"),
+    userAgent: text("user_agent"),
+    // Outcome
+    status: text("status").notNull().default("success"), // 'success' | 'failure' | 'denied'
+    errorMessage: text("error_message"),
+    // Timestamp
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  },
+  (table) => [
+    index("idx_audit_log_tenant").on(table.tenantId, table.createdAt),
+    index("idx_audit_log_user").on(table.userId, table.createdAt),
+    index("idx_audit_log_action").on(table.action),
+    index("idx_audit_log_resource").on(table.resourceType, table.resourceId),
   ],
 );
